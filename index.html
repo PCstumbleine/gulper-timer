@@ -65,7 +65,6 @@ textarea { resize: none; }
 .tweak-row input[type=color] { width: 36px; height: 28px; border: none; border-radius: 6px; cursor: pointer; background: none; }
 .tweak-row input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 2px; }
@@ -75,6 +74,40 @@ textarea { resize: none; }
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
+
+// ── Session persistence ───────────────────────────────────────────────
+const PERSIST_KEY = 'gulper_active_session';
+
+// Load and revive saved session from localStorage. Runs once at module
+// level before React mounts, so all useState calls can read it directly.
+const _SAVED = (() => {
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    // Revive session.sessionStart (JSON → ISO string → Date)
+    if (d.session?.sessionStart) {
+      d.session = { ...d.session, sessionStart: new Date(d.session.sessionStart) };
+    }
+    // Revive log entry timestamps
+    if (Array.isArray(d.gulpers)) {
+      d.gulpers = d.gulpers.map(g => ({
+        ...g,
+        log: Array.isArray(g.log)
+          ? g.log.map(e => ({ ...e, ts: e.ts ? new Date(e.ts) : new Date() }))
+          : [],
+      }));
+    }
+    return d;
+  } catch(e) { return null; }
+})();
+
+function saveSession(snapshot) {
+  try { localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot)); } catch(e) {}
+}
+function clearSavedSession() {
+  try { localStorage.removeItem(PERSIST_KEY); } catch(e) {}
+}
 
 // ── Default task hierarchy (mutable per session) ─────────────────────
 const DEFAULT_TASKS = [
@@ -96,7 +129,12 @@ function fmtTimer(ms, compact = false) {
     ? `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
     : `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${t}`;
 }
-function fmtWall(d) { return d ? d.toTimeString().slice(0,8) : '—'; }
+// Handles both Date objects and ISO strings (localStorage revival)
+function fmtWall(d) {
+  if (!d) return '—';
+  const dt = d instanceof Date ? d : new Date(d);
+  return dt.toTimeString().slice(0,8);
+}
 function fmtLocalDate(d) {
   if (!d) return '';
   const dt = d instanceof Date ? d : new Date(d);
@@ -115,8 +153,16 @@ function genJobId() {
   localStorage.setItem(storageKey, String(count));
   return `job_${dateStr}_${String(count).padStart(2,'0')}`;
 }
+// Timestamp-based gulper state:
+//   accumulatedMs  — total ms from completed run/pause cycles for current subtask
+//   runningSince   — epoch ms when current run started, null when paused
+//   running        — convenience boolean kept in sync with runningSince
 function newGulper(name) {
-  return { name, taskId: 'travel', subtaskIdx: 0, elapsed: 0, running: false, lastStart: null, log: [] };
+  return { name, taskId: 'travel', subtaskIdx: 0, accumulatedMs: 0, running: false, runningSince: null, log: [] };
+}
+// Compute live elapsed purely from wall clock — correct even after backgrounding
+function liveElapsed(g) {
+  return g.runningSince ? g.accumulatedMs + (Date.now() - g.runningSince) : g.accumulatedMs;
 }
 function parseCoords(str) {
   const m = str.match(/(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)/);
@@ -126,7 +172,6 @@ function fmtCoords(c) {
   if (!c) return '—';
   return `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`;
 }
-// Returns a coord object as a plain string, empty string if null
 function coordStr(c) {
   return c ? `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}` : '';
 }
@@ -138,7 +183,6 @@ function App() {
     "darkMode": true
   }/*EDITMODE-END*/;
 
-  // Load theme from localStorage; default dark
   const [tweaks, setTweaks] = useState(() => {
     try {
       const stored = localStorage.getItem('gulper_theme');
@@ -149,27 +193,46 @@ function App() {
   });
   const [tweaksOpen, setTweaksOpen] = useState(false);
 
-  // screen: 'setup' | 'timer' | 'review'
-  const [screen, setScreen] = useState('setup');
-  // true when returning to Setup from an active Timer session
-  const [isResuming, setIsResuming] = useState(false);
-
-  // session metadata
-  const [session, setSession] = useState({
-    jobId: '',
-    enumerator: '',
-    gulper1Name: 'Gulper 1',
-    gulper1Home: null,
-    gulper2Name: 'Gulper 2',
-    gulper2Home: null,
-    latrineCoords: null,
-    sessionStart: null,
+  // Initialise all state from saved session if present, otherwise defaults
+  const [screen,     setScreen]     = useState(_SAVED?.screen     || 'setup');
+  const [isResuming, setIsResuming] = useState(_SAVED?.isResuming || false);
+  const [session,    setSession]    = useState(_SAVED?.session     || {
+    jobId: '', enumerator: '',
+    gulper1Name: 'Gulper 1', gulper1Home: null,
+    gulper2Name: 'Gulper 2', gulper2Home: null,
+    latrineCoords: null, sessionStart: null,
   });
+  const [tasks,   setTasks]   = useState(_SAVED?.tasks   || DEFAULT_TASKS);
+  const [gulpers, setGulpers] = useState(_SAVED?.gulpers || null);
 
-  const [tasks, setTasks] = useState(DEFAULT_TASKS);
-  const [gulpers, setGulpers] = useState(null);
+  // Always holds the latest snapshot — used by event listeners registered once
+  const persistRef = useRef(null);
 
-  // Toggle dark/light and persist to localStorage
+  // Save to localStorage after every state change while a session is active
+  useEffect(() => {
+    if (gulpers !== null) {
+      const snapshot = { screen, session, tasks, gulpers, isResuming };
+      persistRef.current = snapshot;
+      saveSession(snapshot);
+    }
+  }, [screen, session, tasks, gulpers, isResuming]);
+
+  // Register persistent event listeners once.
+  // visibilitychange + beforeunload cover backgrounding / page kill.
+  // 5s heartbeat is belt-and-suspenders insurance.
+  useEffect(() => {
+    const flush = () => { if (persistRef.current) saveSession(persistRef.current); };
+    const onVisibility = () => { if (document.hidden) flush(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('beforeunload', flush);
+    const heartbeat = setInterval(flush, 5000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('beforeunload', flush);
+      clearInterval(heartbeat);
+    };
+  }, []);
+
   function toggleTheme() {
     setTweaks(t => {
       const next = { ...t, darkMode: !t.darkMode };
@@ -178,7 +241,6 @@ function App() {
     });
   }
 
-  // Fresh session: reset everything
   function startSession(meta) {
     setSession({ ...meta, sessionStart: new Date() });
     setGulpers([newGulper(meta.gulper1Name), newGulper(meta.gulper2Name)]);
@@ -186,7 +248,6 @@ function App() {
     setScreen('timer');
   }
 
-  // Resume: update metadata + gulper names, but do NOT reset timers or logs
   function resumeSession(meta) {
     setSession(s => ({
       ...s,
@@ -196,9 +257,7 @@ function App() {
       gulper1Home: meta.gulper1Home,
       gulper2Name: meta.gulper2Name,
       gulper2Home: meta.gulper2Home,
-      // sessionStart and latrineCoords intentionally preserved
     }));
-    // Update live gulper names only; existing log entries keep their old gulper name
     setGulpers(gs => gs.map((g, i) => ({
       ...g,
       name: i === 0 ? meta.gulper1Name : meta.gulper2Name,
@@ -207,14 +266,15 @@ function App() {
     setScreen('timer');
   }
 
-  // Pause timers and return to Setup with current values pre-filled
   function backToSetup() {
     setIsResuming(true);
     setScreen('setup');
-    // Timer pausing is handled in TimerScreen before calling this
   }
 
+  // Only called when the user finalises and starts a genuinely new session
   function newSession() {
+    clearSavedSession();
+    persistRef.current = null;
     setGulpers(null);
     setTasks(DEFAULT_TASKS);
     setSession({ jobId: '', enumerator: '', gulper1Name: 'Gulper 1', gulper1Home: null, gulper2Name: 'Gulper 2', gulper2Home: null, latrineCoords: null, sessionStart: null });
@@ -222,10 +282,9 @@ function App() {
     setScreen('setup');
   }
 
-  // Theme variables
-  const dark = tweaks.darkMode;
-  const accent = tweaks.accent;
-  const bg       = dark ? '#141412' : '#F5F4F0';
+  const dark    = tweaks.darkMode;
+  const accent  = tweaks.accent;
+  const bg      = dark ? '#141412' : '#F5F4F0';
   const surface  = dark ? '#1F1E1B' : '#FFFFFF';
   const surface2 = dark ? '#252420' : '#F7F6F2';
   const divider  = dark ? '#2E2D28' : '#E0DED6';
@@ -233,10 +292,9 @@ function App() {
   const ts       = dark ? '#8A8880' : '#6B6960';
   const theme    = { dark, accent, bg, surface, surface2, divider, tp, ts };
 
-  // Design-mode message bridge (tweaks panel)
   useEffect(() => {
     const h = (e) => {
-      if (e.data?.type === '__activate_edit_mode') setTweaksOpen(true);
+      if (e.data?.type === '__activate_edit_mode')   setTweaksOpen(true);
       if (e.data?.type === '__deactivate_edit_mode') setTweaksOpen(false);
     };
     window.addEventListener('message', h);
@@ -280,7 +338,7 @@ function App() {
         />
       )}
 
-      {/* Tweaks — design mode only, not shown in normal use */}
+      {/* Tweaks — design mode only */}
       <div className={`tweaks-panel ${tweaksOpen ? 'open' : ''}`}>
         <h3>Tweaks</h3>
         <div className="tweak-row">
@@ -303,8 +361,7 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
   const { dark, accent, bg, surface, surface2, divider, tp, ts } = theme;
   const isResuming = !!onResume;
 
-  // When resuming, use existing jobId; for a new session, generate a fresh one
-  const [jobId] = useState(() => initialValues?.jobId || genJobId());
+  const [jobId]      = useState(() => initialValues?.jobId || genJobId());
   const [enumerator, setEnumerator] = useState(initialValues?.enumerator || '');
   const [g1Name, setG1Name] = useState(initialValues?.gulper1Name || 'Gulper 1');
   const [g1Home, setG1Home] = useState(coordStr(initialValues?.gulper1Home));
@@ -336,22 +393,16 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
       gulper1Home: parseCoords(g1Home),
       gulper2Name: g2Name.trim(),
       gulper2Home: parseCoords(g2Home),
-      // Preserve latrine coords captured on the Timer screen when resuming
       latrineCoords: initialValues?.latrineCoords || null,
     };
-    if (onResume) {
-      onResume(meta);
-    } else {
-      onStart(meta);
-    }
+    if (onResume) { onResume(meta); } else { onStart(meta); }
   }
 
   const inputStyle = {
     width: '100%', padding: '10px 12px',
     background: surface2, border: `1px solid ${divider}`,
     borderRadius: 8, color: tp, fontSize: 15,
-    outline: 'none',
-    fontFamily: 'IBM Plex Sans',
+    outline: 'none', fontFamily: 'IBM Plex Sans',
   };
   const labelStyle = { fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts, marginBottom: 5, display: 'block' };
 
@@ -365,8 +416,7 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
           style={{ ...inputStyle, flex: 1, fontFamily: 'IBM Plex Mono', fontSize: 13 }}
         />
         <button
-          onClick={() => getLocation(onChange)}
-          disabled={isLoading}
+          onClick={() => getLocation(onChange)} disabled={isLoading}
           title="Use my current location"
           style={{
             width: 42, borderRadius: 8, border: `1px solid ${divider}`,
@@ -382,7 +432,6 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '0 0 32px' }}>
-      {/* Header */}
       <div style={{
         padding: '28px 20px 20px', borderBottom: `1px solid ${divider}`,
         background: surface, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
@@ -393,45 +442,32 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
             {isResuming ? 'Resume Session' : 'New Session'}
           </div>
           <div style={{ fontSize: 14, color: ts, marginTop: 4 }}>
-            {isResuming
-              ? 'Edit details, then tap Resume to continue timing.'
-              : 'Fill in job details before starting the timers.'}
+            {isResuming ? 'Edit details, then tap Resume to continue timing.' : 'Fill in job details before starting the timers.'}
           </div>
         </div>
-        {/* Theme toggle — header shortcut */}
-        <button
-          onClick={toggleTheme}
-          title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-          style={{
-            width: 44, height: 44, borderRadius: 10, border: `1px solid ${divider}`,
-            background: surface2, cursor: 'pointer', flexShrink: 0,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, marginTop: 2,
-          }}
-        >{dark ? '☀️' : '🌙'}</button>
+        <button onClick={toggleTheme} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{
+          width: 44, height: 44, borderRadius: 10, border: `1px solid ${divider}`,
+          background: surface2, cursor: 'pointer', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, marginTop: 2,
+        }}>{dark ? '☀️' : '🌙'}</button>
       </div>
 
       <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 640, margin: '0 auto', width: '100%' }}>
 
-        {/* Appearance — prominent segmented control */}
+        {/* Appearance */}
         <div style={{ background: surface, borderRadius: 12, border: `1px solid ${divider}`, overflow: 'hidden' }}>
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>
-            Appearance
-          </div>
+          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>Appearance</div>
           <div style={{ padding: 10 }}>
             <div style={{ display: 'flex', gap: 6, background: dark ? '#0E0D0B' : '#E0DFD9', borderRadius: 10, padding: 4 }}>
               {[{ label: '☀️  Light', val: false }, { label: '🌙  Dark', val: true }].map(opt => (
-                <button
-                  key={opt.label}
-                  onClick={() => { if (dark !== opt.val) toggleTheme(); }}
-                  style={{
-                    flex: 1, height: 48, borderRadius: 8, border: 'none', cursor: 'pointer',
-                    background: dark === opt.val ? (dark ? '#2C2B26' : '#FFFFFF') : 'transparent',
-                    color: dark === opt.val ? tp : ts,
-                    fontWeight: dark === opt.val ? 700 : 500, fontSize: 16,
-                    boxShadow: dark === opt.val ? '0 1px 5px rgba(0,0,0,0.22)' : 'none',
-                    transition: 'background 0.15s, color 0.15s, box-shadow 0.15s',
-                  }}
-                >{opt.label}</button>
+                <button key={opt.label} onClick={() => { if (dark !== opt.val) toggleTheme(); }} style={{
+                  flex: 1, height: 48, borderRadius: 8, border: 'none', cursor: 'pointer',
+                  background: dark === opt.val ? (dark ? '#2C2B26' : '#FFFFFF') : 'transparent',
+                  color: dark === opt.val ? tp : ts,
+                  fontWeight: dark === opt.val ? 700 : 500, fontSize: 16,
+                  boxShadow: dark === opt.val ? '0 1px 5px rgba(0,0,0,0.22)' : 'none',
+                  transition: 'background 0.15s, color 0.15s, box-shadow 0.15s',
+                }}>{opt.label}</button>
               ))}
             </div>
           </div>
@@ -461,11 +497,7 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
               { label: 'Gulper 1', name: g1Name, setName: setG1Name, home: g1Home, setHome: setG1Home },
               { label: 'Gulper 2', name: g2Name, setName: setG2Name, home: g2Home, setHome: setG2Home },
             ].map((g, i) => (
-              <div key={i} style={{
-                padding: 14, borderRadius: 10,
-                background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)',
-                border: `1px solid ${divider}`,
-              }}>
+              <div key={i} style={{ padding: 14, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', border: `1px solid ${divider}` }}>
                 <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10, color: ts, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{g.label}</div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <div>
@@ -482,19 +514,13 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
           </div>
         </Section>
 
-        {/* Start / Resume button */}
-        <button
-          onClick={handleStart}
-          disabled={!canStart}
-          style={{
-            height: 58, borderRadius: 12, border: 'none',
-            background: canStart ? accent : (dark ? '#2A2820' : '#E0DED6'),
-            color: canStart ? '#fff' : ts,
-            fontWeight: 700, fontSize: 17, cursor: canStart ? 'pointer' : 'default',
-            transition: 'background 0.2s, color 0.2s',
-            letterSpacing: '0.01em',
-          }}
-        >
+        <button onClick={handleStart} disabled={!canStart} style={{
+          height: 58, borderRadius: 12, border: 'none',
+          background: canStart ? accent : (dark ? '#2A2820' : '#E0DED6'),
+          color: canStart ? '#fff' : ts,
+          fontWeight: 700, fontSize: 17, cursor: canStart ? 'pointer' : 'default',
+          transition: 'background 0.2s, color 0.2s', letterSpacing: '0.01em',
+        }}>
           {isResuming ? 'Resume Session →' : 'Start Session →'}
         </button>
       </div>
@@ -518,61 +544,56 @@ function Section({ label, children, theme }) {
 // SCREEN 2 — Timer
 // ═══════════════════════════════════════════════════════════════════════
 function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, setGulpers, onEnd, onBackToSetup, toggleTheme }) {
-  const { dark, accent, bg, surface, surface2, divider, tp, ts } = theme;
+  const { divider } = theme;
   const [tick, setTick] = useState(0);
   const [picker, setPicker] = useState({ gulperIdx: null, open: false });
 
+  // Drives display updates only — does NOT mutate any timer state
   useEffect(() => {
     const id = setInterval(() => setTick(t => t + 1), 100);
     return () => clearInterval(id);
   }, []);
 
-  function liveElapsed(g) {
-    return g.running && g.lastStart ? g.elapsed + (Date.now() - g.lastStart) : g.elapsed;
-  }
-
   function toggleTimer(idx) {
     setGulpers(gs => gs.map((g, i) => {
       if (i !== idx) return g;
-      return g.running
-        ? { ...g, running: false, elapsed: g.elapsed + (Date.now() - g.lastStart), lastStart: null }
-        : { ...g, running: true, lastStart: Date.now() };
+      if (g.running) {
+        return { ...g, running: false, accumulatedMs: g.accumulatedMs + (Date.now() - g.runningSince), runningSince: null };
+      }
+      return { ...g, running: true, runningSince: Date.now() };
     }));
   }
 
   function pickTask(gulperIdx, taskId, subtaskIdx) {
     setGulpers(gs => gs.map((g, i) => {
       if (i !== gulperIdx) return g;
-      const elapsed = g.running ? g.elapsed + (Date.now() - g.lastStart) : g.elapsed;
+      const elapsed = liveElapsed(g);
       const oldTask = tasks.find(t => t.id === g.taskId);
-      // Only log if meaningful time has elapsed (>2s) — avoids duplicate from onNextAndPick
-      // Store gulper name so renames don't alter historical records
       const logEntries = elapsed > 2000 ? [{
         gulper: g.name,
         task: oldTask?.label,
         subtask: oldTask?.subtasks[g.subtaskIdx] || oldTask?.label,
         ms: elapsed, ts: new Date(),
       }, ...g.log] : g.log;
-      return { ...g, taskId, subtaskIdx: subtaskIdx ?? 0, elapsed: 0, running: true, lastStart: Date.now(), log: logEntries };
+      return { ...g, taskId, subtaskIdx: subtaskIdx ?? 0, accumulatedMs: 0, running: true, runningSince: Date.now(), log: logEntries };
     }));
     setPicker({ gulperIdx: null, open: false });
   }
 
-  // Pause all timers, then go back to Setup
-  function handleBackToSetup() {
-    setGulpers(gs => gs.map(g => g.running
-      ? { ...g, running: false, elapsed: g.elapsed + (Date.now() - g.lastStart), lastStart: null }
+  function pauseAll(gs) {
+    return gs.map(g => g.running
+      ? { ...g, running: false, accumulatedMs: g.accumulatedMs + (Date.now() - g.runningSince), runningSince: null }
       : g
-    ));
+    );
+  }
+
+  function handleBackToSetup() {
+    setGulpers(pauseAll);
     onBackToSetup();
   }
 
-  // Pause all timers, then go to Review
   function handleEnd() {
-    setGulpers(gs => gs.map(g => g.running
-      ? { ...g, running: false, elapsed: g.elapsed + (Date.now() - g.lastStart), lastStart: null }
-      : g
-    ));
+    setGulpers(pauseAll);
     onEnd();
   }
 
@@ -586,7 +607,6 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
         theme={theme}
       />
 
-      {/* Split view */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', gap: 1, background: divider }}>
         {gulpers.map((g, idx) => (
           <GulperPanel
@@ -594,15 +614,13 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
             elapsed={liveElapsed(g)}
             onToggle={() => toggleTimer(idx)}
             onNextAndPick={() => {
-              // Log current elapsed, stop timer, then open picker
               setGulpers(gs => gs.map((g, i) => {
                 if (i !== idx) return g;
                 const task = tasks.find(t => t.id === g.taskId);
-                const elapsed = g.running ? g.elapsed + (Date.now() - g.lastStart) : g.elapsed;
+                const elapsed = liveElapsed(g);
                 const subtaskLabel = task.subtasks.length > 0 ? task.subtasks[g.subtaskIdx] : task.label;
-                // Store gulper name in entry so renames don't alter historical records
                 const entry = { gulper: g.name, task: task.label, subtask: subtaskLabel, ms: elapsed, ts: new Date() };
-                return { ...g, running: false, elapsed: 0, lastStart: null, log: [entry, ...g.log] };
+                return { ...g, running: false, accumulatedMs: 0, runningSince: null, log: [entry, ...g.log] };
               }));
               setPicker({ gulperIdx: idx, open: true });
             }}
@@ -657,7 +675,6 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
         padding: '0 10px', background: surface, borderBottom: `1px solid ${divider}`,
         flexShrink: 0, gap: 6,
       }}>
-        {/* Back to Setup — top-left */}
         <button onClick={onBackToSetup} style={{
           display: 'flex', alignItems: 'center', gap: 3,
           padding: '6px 10px', borderRadius: 7, border: `1px solid ${divider}`,
@@ -665,15 +682,12 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
           color: ts, fontSize: 13, fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap',
         }}>← Setup</button>
 
-        {/* Job ID — flexible, truncates if needed */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, flex: 1 }}>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts, flexShrink: 0 }}>Job</span>
           <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, fontWeight: 600, color: tp, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.jobId}</span>
         </div>
 
-        {/* Latrine GPS */}
-        <button
-          onClick={captureLatrine}
+        <button onClick={captureLatrine}
           title={hasCoordsLatrine ? `Latrine: ${fmtCoords(session.latrineCoords)} — tap to update` : 'Capture pit latrine GPS'}
           style={{
             display: 'flex', alignItems: 'center', gap: 5,
@@ -688,24 +702,17 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
           </span>
         </button>
 
-        {/* Session start clock */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
           <span style={{ fontSize: 10, color: ts }}>Started</span>
           <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 11, fontWeight: 600, color: tp }}>{fmtWall(session.sessionStart)}</span>
         </div>
 
-        {/* Theme toggle */}
-        <button
-          onClick={toggleTheme}
-          title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-          style={{
-            width: 36, height: 36, borderRadius: 8, border: `1px solid ${divider}`,
-            background: 'transparent', cursor: 'pointer', flexShrink: 0,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-          }}
-        >{dark ? '☀️' : '🌙'}</button>
+        <button onClick={toggleTheme} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{
+          width: 36, height: 36, borderRadius: 8, border: `1px solid ${divider}`,
+          background: 'transparent', cursor: 'pointer', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+        }}>{dark ? '☀️' : '🌙'}</button>
 
-        {/* End Session — large, filled red, top-right */}
         <button onClick={onEnd} style={{
           height: 42, padding: '0 16px', borderRadius: 8,
           border: 'none', background: '#CC3333', color: '#fff',
@@ -713,7 +720,6 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
         }}>End Session</button>
       </div>
 
-      {/* GPS toast */}
       {gpsToast && (
         <div style={{
           position: 'fixed', top: 64, left: '50%', transform: 'translateX(-50%)',
@@ -738,12 +744,8 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: surface, overflow: 'hidden' }}>
-      {/* Header — gulper name centered and large */}
       <div style={{ padding: '10px 14px 8px', borderBottom: `1px solid ${divider}`, flexShrink: 0, position: 'relative' }}>
-        <div style={{
-          textAlign: 'center', fontWeight: 700, fontSize: 26,
-          color: tp, letterSpacing: '-0.01em', lineHeight: 1.15,
-        }}>
+        <div style={{ textAlign: 'center', fontWeight: 700, fontSize: 26, color: tp, letterSpacing: '-0.01em', lineHeight: 1.15 }}>
           {gulper.name}
         </div>
         <div style={{ position: 'absolute', top: '50%', right: 14, transform: 'translateY(-50%)' }}>
@@ -751,12 +753,8 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
         </div>
       </div>
 
-      {/* Task + subtask — large, high-contrast */}
       <div style={{ padding: '8px 14px 4px', flexShrink: 0 }}>
-        <button onClick={onPickTask} style={{
-          background: 'transparent', border: 'none', cursor: 'pointer',
-          padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6, color: tp,
-        }}>
+        <button onClick={onPickTask} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6, color: tp }}>
           <span style={{ fontSize: 26, fontWeight: 700 }}>{task.label}</span>
           <span style={{ fontSize: 14, color: ts, marginTop: 3 }}>▾</span>
         </button>
@@ -770,7 +768,6 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
         )}
       </div>
 
-      {/* Stopwatch */}
       <div style={{
         margin: '6px 14px 8px', borderRadius: 10, padding: '12px 14px',
         background: gulper.running ? (dark ? 'rgba(232,160,32,0.1)' : 'rgba(232,160,32,0.07)') : (dark ? '#1A1917' : '#F5F4F0'),
@@ -783,7 +780,6 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
         }}>{fmtTimer(elapsed)}</div>
       </div>
 
-      {/* Buttons */}
       <div style={{ padding: '0 14px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
         <button onClick={onToggle} style={{
           height: 52, borderRadius: 10, border: 'none', cursor: 'pointer',
@@ -805,7 +801,6 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
         </button>
       </div>
 
-      {/* Log */}
       <div style={{ flex: 1, overflow: 'hidden', margin: '10px 0 0', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '0 14px 4px', flexShrink: 0 }}>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ts }}>
@@ -821,7 +816,7 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
                   <span style={{ fontSize: 12, fontWeight: 600, color: tp, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {entry.subtask && entry.subtask !== entry.task ? `${entry.task} · ${entry.subtask}` : entry.task}
                   </span>
-                  <span style={{ fontSize: 10, color: ts }}>{entry.ts.toTimeString().slice(0,8)}</span>
+                  <span style={{ fontSize: 10, color: ts }}>{new Date(entry.ts).toTimeString().slice(0,8)}</span>
                 </div>
                 <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 13, fontWeight: 600, color: tp, flexShrink: 0 }}>
                   {fmtTimer(entry.ms, true)}
@@ -912,8 +907,7 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
                         <button key={si} onClick={() => onPick(task.id, si)} style={{
                           width: '100%', textAlign: 'left', padding: '11px 16px 11px 28px',
                           background: isCurSub ? (dark ? 'rgba(232,160,32,0.14)' : 'rgba(232,160,32,0.1)') : 'transparent',
-                          border: 'none', cursor: 'pointer',
-                          borderBottom: `1px solid ${divider}`,
+                          border: 'none', cursor: 'pointer', borderBottom: `1px solid ${divider}`,
                           display: 'flex', alignItems: 'center', gap: 10,
                         }}>
                           <div style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: isCurSub ? accent : (dark ? '#444' : '#C8C5BC') }} />
@@ -928,12 +922,10 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
             );
           })}
 
-          {/* Add custom task */}
           {!addingTask ? (
             <button onClick={() => setAddingTask(true)} style={{
               width: '100%', padding: '14px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${divider}`,
-              color: ts,
+              display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${divider}`, color: ts,
             }}>
               <span style={{ fontSize: 20, lineHeight: 1, color: accent }}>+</span>
               <span style={{ fontSize: 15, fontWeight: 500 }}>Add custom task…</span>
@@ -941,26 +933,15 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
           ) : (
             <div style={{ padding: '14px 16px', borderTop: `1px solid ${divider}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ fontWeight: 600, fontSize: 14, color: tp }}>New task</div>
-              <input
-                autoFocus value={newTaskName} onChange={e => setNewTaskName(e.target.value)}
-                placeholder="Task name (e.g. Equipment repair)"
-                style={inputSt}
-              />
-              <input
-                value={newSubtasks} onChange={e => setNewSubtasks(e.target.value)}
-                placeholder="Subtasks, comma-separated (optional)"
-                style={inputSt}
-              />
+              <input autoFocus value={newTaskName} onChange={e => setNewTaskName(e.target.value)} placeholder="Task name (e.g. Equipment repair)" style={inputSt} />
+              <input value={newSubtasks} onChange={e => setNewSubtasks(e.target.value)} placeholder="Subtasks, comma-separated (optional)" style={inputSt} />
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => setAddingTask(false)} style={{
-                  flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`,
-                  background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14,
-                }}>Cancel</button>
+                <button onClick={() => setAddingTask(false)} style={{ flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`, background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancel</button>
                 <button onClick={submitNewTask} disabled={!newTaskName.trim()} style={{
                   flex: 1, height: 40, borderRadius: 8, border: 'none',
                   background: newTaskName.trim() ? accent : (dark ? '#2A2820' : '#E0DED6'),
-                  color: newTaskName.trim() ? '#fff' : ts, cursor: newTaskName.trim() ? 'pointer' : 'default',
-                  fontWeight: 700, fontSize: 14,
+                  color: newTaskName.trim() ? '#fff' : ts,
+                  cursor: newTaskName.trim() ? 'pointer' : 'default', fontWeight: 700, fontSize: 14,
                 }}>Add task</button>
               </div>
             </div>
@@ -976,20 +957,18 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
 // SCREEN 3 — Review & Export
 // ═══════════════════════════════════════════════════════════════════════
 function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, toggleTheme }) {
-  const { dark, accent, bg, surface, surface2, divider, tp, ts } = theme;
+  const { dark, accent, surface, divider, tp, ts } = theme;
 
-  // Build entries with gulper label, editable elapsed
   const initEntries = () => {
     const entries = [];
     gulpers.forEach(g => {
-      // Prefer name stored at log time; fall back to current name for legacy entries
       g.log.forEach(e => entries.push({ ...e, gulper: e.gulper || g.name, inProgress: false, note: '' }));
       const task = tasks.find(t => t.id === g.taskId);
       entries.push({
         gulper: g.name,
         task: task?.label || g.taskId,
         subtask: task?.subtasks[g.subtaskIdx] || task?.label || '',
-        ms: g.running && g.lastStart ? g.elapsed + (Date.now() - g.lastStart) : g.elapsed,
+        ms: liveElapsed(g),
         ts: new Date(), inProgress: true, note: '',
       });
     });
@@ -1044,7 +1023,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
 
   function exportCSV() {
     const infoRows = buildSessionInfoRows();
-    const logRows = buildTimeLogRows();
+    const logRows  = buildTimeLogRows();
     const all = [...infoRows, [], ['--- TIME LOG ---'], ...logRows];
     const csv = all.map(r => r.map(c => `"${(c||'').toString().replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -1066,8 +1045,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     const tsv = rows.map(r => r.join('\t')).join('\n');
     function fallback() {
       if (ref.current) {
-        ref.current.value = tsv;
-        ref.current.select();
+        ref.current.value = tsv; ref.current.select();
         ref.current.setSelectionRange(0, 99999);
         try { document.execCommand('copy'); setCopied(true); } catch(e) {}
       }
@@ -1085,81 +1063,67 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Header */}
       <div style={{ padding: '14px 16px', background: surface, borderBottom: `1px solid ${divider}`, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12 }}>
         <button onClick={onBack} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: ts, fontSize: 20, lineHeight: 1, padding: 0 }}>←</button>
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 700, fontSize: 17 }}>Session Review</div>
           <div style={{ fontSize: 12, color: ts }}>Check everything before exporting.</div>
         </div>
-        {/* Theme toggle */}
-        <button
-          onClick={toggleTheme}
-          title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-          style={{
-            width: 38, height: 38, borderRadius: 8, border: `1px solid ${divider}`,
-            background: 'transparent', cursor: 'pointer', flexShrink: 0,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
-          }}
-        >{dark ? '☀️' : '🌙'}</button>
+        <button onClick={toggleTheme} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{
+          width: 38, height: 38, borderRadius: 8, border: `1px solid ${divider}`,
+          background: 'transparent', cursor: 'pointer', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+        }}>{dark ? '☀️' : '🌙'}</button>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', padding: '16px', display: 'flex', flexDirection: 'column', gap: 16, WebkitOverflowScrolling: 'touch' }}>
 
-        {/* Session metadata */}
-        <div style={{ background: surface, borderRadius: 12, border: `1px solid ${divider}` }}>
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>Session Info</div>
-          <div style={{ padding: '14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
-            {[
-              ['Job ID', session.jobId || '—'],
-              ['Enumerator', session.enumerator || '—'],
-              ['Started', fmtWall(session.sessionStart)],
-              ['Ended', fmtWall(new Date())],
-              ['Pit latrine GPS', fmtCoords(session.latrineCoords)],
-              [session.gulper1Name + ' home', fmtCoords(session.gulper1Home)],
-              [session.gulper2Name + ' home', fmtCoords(session.gulper2Home)],
-            ].map(([label, val], i) => (
-              <div key={i}>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: ts, marginBottom: 3 }}>{label}</div>
-                <div style={{ fontSize: 13, fontFamily: 'IBM Plex Mono', fontWeight: 500, color: tp, wordBreak: 'break-all' }}>{val}</div>
-              </div>
-            ))}
+          <div style={{ background: surface, borderRadius: 12, border: `1px solid ${divider}` }}>
+            <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>Session Info</div>
+            <div style={{ padding: '14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
+              {[
+                ['Job ID', session.jobId || '—'],
+                ['Enumerator', session.enumerator || '—'],
+                ['Started', fmtWall(session.sessionStart)],
+                ['Ended', fmtWall(new Date())],
+                ['Pit latrine GPS', fmtCoords(session.latrineCoords)],
+                [session.gulper1Name + ' home', fmtCoords(session.gulper1Home)],
+                [session.gulper2Name + ' home', fmtCoords(session.gulper2Home)],
+              ].map(([label, val], i) => (
+                <div key={i}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: ts, marginBottom: 3 }}>{label}</div>
+                  <div style={{ fontSize: 13, fontFamily: 'IBM Plex Mono', fontWeight: 500, color: tp, wordBreak: 'break-all' }}>{val}</div>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
 
-        {/* Notes */}
-        <div style={{ background: surface, borderRadius: 12, border: `1px solid ${divider}` }}>
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>Session Notes</div>
-          <div style={{ padding: 14 }}>
-            <textarea
-              value={globalNote} onChange={e => setGlobalNote(e.target.value)}
-              placeholder="Any observations, anomalies, or comments about this session…"
-              rows={4}
-              style={{ ...inpSt, width: '100%', padding: '10px 12px', fontSize: 14, lineHeight: 1.6, resize: 'vertical' }}
-            />
+          <div style={{ background: surface, borderRadius: 12, border: `1px solid ${divider}` }}>
+            <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>Session Notes</div>
+            <div style={{ padding: 14 }}>
+              <textarea
+                value={globalNote} onChange={e => setGlobalNote(e.target.value)}
+                placeholder="Any observations, anomalies, or comments about this session…"
+                rows={4}
+                style={{ ...inpSt, width: '100%', padding: '10px 12px', fontSize: 14, lineHeight: 1.6, resize: 'vertical' }}
+              />
+            </div>
           </div>
-        </div>
 
-        {/* Spacer for export bar */}
-        <div style={{ height: 80 }} />
+          <div style={{ height: 80 }} />
+        </div>
       </div>
-    </div>
 
-      {/* Export bar */}
       <div style={{ padding: '12px 16px', background: surface, borderTop: `1px solid ${divider}`, display: 'flex', gap: 8, flexShrink: 0 }}>
         <button onClick={openSheetsModal} style={{
           flex: 1, height: 54, borderRadius: 10, border: 'none',
           background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#fff',
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-        }}>
-          <SheetsIcon /> Open in Google Sheets
-        </button>
+        }}><SheetsIcon /> Open in Google Sheets</button>
         <button onClick={onNewSession} title="New session" style={{
-          height: 54, width: 54, borderRadius: 10,
-          border: `1.5px solid ${divider}`,
-          background: 'transparent', cursor: 'pointer',
-          fontWeight: 700, fontSize: 22, color: ts,
+          height: 54, width: 54, borderRadius: 10, border: `1.5px solid ${divider}`,
+          background: 'transparent', cursor: 'pointer', fontWeight: 700, fontSize: 22, color: ts,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>&#8635;</button>
       </div>
@@ -1174,7 +1138,6 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
         }}>{toast}</div>
       )}
 
-      {/* Google Sheets two-sheet export modal */}
       {sheetsModal && <SheetsExportModal
         dark={dark} surface={surface} divider={divider} tp={tp} ts={ts} accent={accent}
         infoRows={buildSessionInfoRows()} logRows={buildTimeLogRows()}
@@ -1232,45 +1195,32 @@ function SheetsExportModal({ dark, surface, divider, tp, ts, accent, infoRows, l
             ))}
           </div>
 
-          {/* Sheet 1 */}
           <div style={{ background: dark ? '#1A1917' : '#F5F4F0', borderRadius: 10, padding: 12, border: `1px solid ${divider}` }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 13, color: tp }}>Sheet 1 — Session Info</div>
                 <div style={{ fontSize: 11, color: ts }}>{infoRows.length} rows · summary + task totals</div>
               </div>
-              <button onClick={onCopy1} style={{
-                padding: '6px 14px', borderRadius: 7, border: 'none',
-                background: copied1 ? '#3A9E5A' : accent, color: '#fff',
-                fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0,
-              }}>{copied1 ? '✓ Copied!' : 'Copy'}</button>
+              <button onClick={onCopy1} style={{ padding: '6px 14px', borderRadius: 7, border: 'none', background: copied1 ? '#3A9E5A' : accent, color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0 }}>{copied1 ? '✓ Copied!' : 'Copy'}</button>
             </div>
             <textarea readOnly value={infoTsv} ref={tsvRef1} onClick={e => e.target.select()} rows={4} style={taStyle} />
           </div>
 
-          {/* Sheet 2 */}
           <div style={{ background: dark ? '#1A1917' : '#F5F4F0', borderRadius: 10, padding: 12, border: `1px solid ${divider}` }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 13, color: tp }}>Sheet 2 — Time Log</div>
                 <div style={{ fontSize: 11, color: ts }}>{logRows.length} rows incl. header</div>
               </div>
-              <button onClick={onCopy2} style={{
-                padding: '6px 14px', borderRadius: 7, border: 'none',
-                background: copied2 ? '#3A9E5A' : accent, color: '#fff',
-                fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0,
-              }}>{copied2 ? '✓ Copied!' : 'Copy'}</button>
+              <button onClick={onCopy2} style={{ padding: '6px 14px', borderRadius: 7, border: 'none', background: copied2 ? '#3A9E5A' : accent, color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0 }}>{copied2 ? '✓ Copied!' : 'Copy'}</button>
             </div>
             <textarea readOnly value={logTsv} ref={tsvRef2} onClick={e => e.target.select()} rows={4} style={taStyle} />
           </div>
           <div style={{ height: 8 }} />
         </div>
 
-        <div style={{ padding: '12px 20px', borderTop: `1px solid ${divider}`, display: 'flex', gap: 8, flexShrink: 0 }}>
-          <button onClick={onClose} style={{
-            flex: 1, height: 46, borderRadius: 10, border: `1.5px solid ${divider}`,
-            background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp,
-          }}>Done</button>
+        <div style={{ padding: '12px 20px', borderTop: `1px solid ${divider}`, flexShrink: 0 }}>
+          <button onClick={onClose} style={{ width: '100%', height: 46, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Done</button>
         </div>
       </div>
     </>
