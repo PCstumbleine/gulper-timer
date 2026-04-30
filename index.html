@@ -14,7 +14,7 @@
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       const sw = `
-        self.addEventListener('install', e => e.waitUntil(caches.open('gulper-v1').then(c => c.addAll(['.']))));
+        self.addEventListener('install', e => e.waitUntil(caches.open('gulper-v1').then(c => c.addAll(['.', 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js']))));
         self.addEventListener('fetch', e => e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))));
       `;
       const blob = new Blob([sw], {type:'text/javascript'});
@@ -38,6 +38,7 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" crossorigin="anonymous"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
@@ -978,6 +979,8 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
   const [entries, setEntries] = useState(initEntries);
   const [globalNote, setGlobalNote] = useState('');
   const [toast, setToast] = useState(null);
+  const [hasExported, setHasExported] = useState(false);
+  const [confirmNew, setConfirmNew] = useState(false);
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 3500); }
 
@@ -1031,28 +1034,55 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     a.href = URL.createObjectURL(blob);
     a.download = `gulper_${session.jobId}_${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
+    setHasExported(true);
   }
 
-  const [sheetsModal, setSheetsModal] = useState(false);
-  const [copied1, setCopied1] = useState(false);
-  const [copied2, setCopied2] = useState(false);
-  const tsvRef1 = useRef(null);
-  const tsvRef2 = useRef(null);
+  function exportXLSX() {
+    if (typeof XLSX === 'undefined') { showToast('Excel library not loaded — check connection'); return; }
 
-  function openSheetsModal() { setSheetsModal(true); setCopied1(false); setCopied2(false); }
+    // Sheet 1: clean key/value session metadata
+    const infoData = [
+      ['Field', 'Value'],
+      ['Job ID', session.jobId || ''],
+      ['Enumerator', session.enumerator || ''],
+      ['Date', fmtLocalDate(session.sessionStart)],
+      ['Session Start', fmtLocalTime(session.sessionStart)],
+      ['Session End', fmtLocalTime(new Date())],
+      ['Pit Latrine GPS', fmtCoords(session.latrineCoords)],
+      [session.gulper1Name + ' Home GPS', fmtCoords(session.gulper1Home)],
+      [session.gulper2Name + ' Home GPS', fmtCoords(session.gulper2Home)],
+      ['Session Notes', globalNote || ''],
+    ];
 
-  function copyData(rows, ref, setCopied) {
-    const tsv = rows.map(r => r.join('\t')).join('\n');
-    function fallback() {
-      if (ref.current) {
-        ref.current.value = tsv; ref.current.select();
-        ref.current.setSelectionRange(0, 99999);
-        try { document.execCommand('copy'); setCopied(true); } catch(e) {}
-      }
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(tsv).then(() => setCopied(true)).catch(fallback);
-    } else { fallback(); }
+    // Sheet 2: same columns as CSV, sorted chronologically by task start time
+    const logHeader = ['Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
+    const sortedEntries = [...entries].sort((a, b) => {
+      const aStart = new Date(a.ts).getTime() - (a.ms || 0);
+      const bStart = new Date(b.ts).getTime() - (b.ms || 0);
+      return aStart - bStart;
+    });
+    const logData = sortedEntries.map(e => {
+      const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
+      return [
+        e.gulper || '', e.task || '', e.subtask || '',
+        ((e.ms || 0) / 1000).toFixed(1),
+        fmtLocalDate(dt), fmtLocalTime(dt),
+        e.note || '',
+      ];
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(infoData), 'Session Info');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([logHeader, ...logData]), 'Time Log');
+
+    const safeId = (session.jobId || 'session').replace(/[^a-zA-Z0-9._-]/g, '_');
+    XLSX.writeFile(wb, `${safeId}.xlsx`);
+    setHasExported(true);
+  }
+
+  function handleNewSession() {
+    if (!hasExported) { setConfirmNew(true); }
+    else { onNewSession(); }
   }
 
   const inpSt = {
@@ -1111,26 +1141,36 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
             </div>
           </div>
 
-          <div style={{ height: 80 }} />
+          <div style={{ height: 16 }} />
         </div>
       </div>
 
-      <div style={{ padding: '12px 16px', background: surface, borderTop: `1px solid ${divider}`, display: 'flex', gap: 8, flexShrink: 0 }}>
-        <button onClick={openSheetsModal} style={{
-          flex: 1, height: 54, borderRadius: 10, border: 'none',
-          background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#fff',
+      {/* Bottom action bar */}
+      <div style={{ padding: '12px 16px 20px', background: surface, borderTop: `1px solid ${divider}`, display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+        <button onClick={exportXLSX} style={{
+          height: 58, borderRadius: 12, border: 'none',
+          background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 17, color: '#fff',
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-        }}><SheetsIcon /> Open in Google Sheets</button>
-        <button onClick={onNewSession} title="New session" style={{
-          height: 54, width: 54, borderRadius: 10, border: `1.5px solid ${divider}`,
-          background: 'transparent', cursor: 'pointer', fontWeight: 700, fontSize: 22, color: ts,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>&#8635;</button>
+        }}>
+          <XlsxIcon /> Download .xlsx
+        </button>
+        <button onClick={exportCSV} style={{
+          height: 40, borderRadius: 8,
+          border: `1px solid ${divider}`, background: 'transparent',
+          cursor: 'pointer', fontWeight: 500, fontSize: 14, color: ts,
+        }}>Export as CSV (backup)</button>
+        <div style={{ height: 1, background: divider, margin: '4px 0' }} />
+        <button onClick={handleNewSession} style={{
+          height: 58, borderRadius: 12,
+          border: `2px solid ${dark ? '#3A2200' : '#F0C060'}`,
+          background: dark ? '#2A1800' : '#FFF8EC',
+          cursor: 'pointer', fontWeight: 700, fontSize: 17, color: accent,
+        }}>Start New Session</button>
       </div>
 
       {toast && (
         <div style={{
-          position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)',
+          position: 'fixed', bottom: 180, left: '50%', transform: 'translateX(-50%)',
           background: dark ? '#2A2820' : '#1A1917', color: '#fff',
           borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 500,
           boxShadow: '0 4px 20px rgba(0,0,0,0.3)', pointerEvents: 'none', zIndex: 300,
@@ -1138,92 +1178,34 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
         }}>{toast}</div>
       )}
 
-      {sheetsModal && <SheetsExportModal
-        dark={dark} surface={surface} divider={divider} tp={tp} ts={ts} accent={accent}
-        infoRows={buildSessionInfoRows()} logRows={buildTimeLogRows()}
-        tsvRef1={tsvRef1} tsvRef2={tsvRef2}
-        copied1={copied1} copied2={copied2}
-        onCopy1={() => copyData(buildSessionInfoRows(), tsvRef1, setCopied1)}
-        onCopy2={() => copyData(buildTimeLogRows(), tsvRef2, setCopied2)}
-        onClose={() => setSheetsModal(false)}
-      />}
+      {/* Confirmation: start new session without exporting */}
+      {confirmNew && (
+        <>
+          <div onClick={() => setConfirmNew(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 400 }} />
+          <div style={{
+            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+            zIndex: 401, background: surface, borderRadius: 14,
+            width: 'min(90vw, 360px)', padding: '24px 20px 20px',
+            boxShadow: '0 16px 60px rgba(0,0,0,0.35)',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 10, color: tp }}>Data not exported</div>
+            <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
+              You haven't downloaded the session data yet. Starting a new session will discard the current data. Continue?
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setConfirmNew(false)} style={{
+                flex: 1, height: 46, borderRadius: 10, border: `1.5px solid ${divider}`,
+                background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 15, color: tp,
+              }}>Cancel</button>
+              <button onClick={() => { setConfirmNew(false); onNewSession(); }} style={{
+                flex: 1, height: 46, borderRadius: 10, border: 'none',
+                background: '#CC3333', cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#fff',
+              }}>Discard &amp; Continue</button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
-  );
-}
-
-function SheetsExportModal({ dark, surface, divider, tp, ts, accent, infoRows, logRows, tsvRef1, tsvRef2, copied1, copied2, onCopy1, onCopy2, onClose }) {
-  const infoTsv = infoRows.map(r => r.join('\t')).join('\n');
-  const logTsv  = logRows.map(r => r.join('\t')).join('\n');
-  const taStyle = {
-    width: '100%', padding: '7px 9px',
-    background: dark ? '#0E0D0B' : '#EEECEA',
-    border: `1px solid ${divider}`, borderRadius: 8,
-    color: ts, fontSize: 10, fontFamily: 'IBM Plex Mono',
-    outline: 'none', lineHeight: 1.4,
-  };
-  return (
-    <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 400 }} />
-      <div style={{
-        position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-        zIndex: 401, background: surface, borderRadius: 14,
-        width: 'min(94vw, 480px)', maxHeight: '88vh',
-        display: 'flex', flexDirection: 'column',
-        boxShadow: '0 16px 60px rgba(0,0,0,0.35)', overflow: 'hidden',
-      }}>
-        <div style={{ padding: '16px 20px 12px', borderBottom: `1px solid ${divider}`, flexShrink: 0 }}>
-          <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 3 }}>Export to Google Sheets</div>
-          <div style={{ fontSize: 13, color: ts, marginBottom: 12 }}>Open your sheet first, then copy each dataset and paste into its own tab.</div>
-          <button onClick={() => window.open('https://sheets.new', '_blank')} style={{
-            width: '100%', height: 46, borderRadius: 10, border: 'none',
-            background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#fff',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-          }}><SheetsIcon /> 1. Open Google Sheets</button>
-        </div>
-
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {[
-              'Copy "Session Info" below → paste into Sheet1 (cell A1), rename tab "Session Info"',
-              'Add a new sheet tab, name it "Time Log"',
-              'Copy "Time Log" below → paste into A1 of that tab',
-            ].map((s, i) => (
-              <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <div style={{ width: 20, height: 20, borderRadius: '50%', background: dark ? '#333' : '#E0DED6', color: tp, fontWeight: 700, fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>{i+2}</div>
-                <span style={{ fontSize: 13, color: tp, lineHeight: 1.5 }}>{s}</span>
-              </div>
-            ))}
-          </div>
-
-          <div style={{ background: dark ? '#1A1917' : '#F5F4F0', borderRadius: 10, padding: 12, border: `1px solid ${divider}` }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 13, color: tp }}>Sheet 1 — Session Info</div>
-                <div style={{ fontSize: 11, color: ts }}>{infoRows.length} rows · summary + task totals</div>
-              </div>
-              <button onClick={onCopy1} style={{ padding: '6px 14px', borderRadius: 7, border: 'none', background: copied1 ? '#3A9E5A' : accent, color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0 }}>{copied1 ? '✓ Copied!' : 'Copy'}</button>
-            </div>
-            <textarea readOnly value={infoTsv} ref={tsvRef1} onClick={e => e.target.select()} rows={4} style={taStyle} />
-          </div>
-
-          <div style={{ background: dark ? '#1A1917' : '#F5F4F0', borderRadius: 10, padding: 12, border: `1px solid ${divider}` }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 13, color: tp }}>Sheet 2 — Time Log</div>
-                <div style={{ fontSize: 11, color: ts }}>{logRows.length} rows incl. header</div>
-              </div>
-              <button onClick={onCopy2} style={{ padding: '6px 14px', borderRadius: 7, border: 'none', background: copied2 ? '#3A9E5A' : accent, color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0 }}>{copied2 ? '✓ Copied!' : 'Copy'}</button>
-            </div>
-            <textarea readOnly value={logTsv} ref={tsvRef2} onClick={e => e.target.select()} rows={4} style={taStyle} />
-          </div>
-          <div style={{ height: 8 }} />
-        </div>
-
-        <div style={{ padding: '12px 20px', borderTop: `1px solid ${divider}`, flexShrink: 0 }}>
-          <button onClick={onClose} style={{ width: '100%', height: 46, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Done</button>
-        </div>
-      </div>
-    </>
   );
 }
 
@@ -1240,8 +1222,11 @@ function PauseIcon({ color }) {
 function NextIcon({ color }) {
   return <svg width="14" height="14" viewBox="0 0 14 14"><polygon points="2,2 10,7 2,12" fill={color}/><rect x="11" y="2" width="2" height="10" rx="1" fill={color}/></svg>;
 }
-function SheetsIcon() {
-  return <svg width="16" height="16" viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2" fill="white" fillOpacity="0.3"/><rect x="7" y="8" width="10" height="1.5" rx="0.75" fill="white"/><rect x="7" y="11.5" width="10" height="1.5" rx="0.75" fill="white"/><rect x="7" y="15" width="6" height="1.5" rx="0.75" fill="white"/></svg>;
+function XlsxIcon() {
+  return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+    <rect x="3" y="2" width="18" height="20" rx="2" fill="white" fillOpacity="0.25"/>
+    <path d="M7 8.5l2.5 3.5L7 15.5M13 8.5l2.5 3.5-2.5 3.5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
