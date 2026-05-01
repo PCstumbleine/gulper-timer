@@ -48,10 +48,10 @@ body {
   touch-action: manipulation;
 }
 #root { height: 100%; display: flex; flex-direction: column; }
-input, textarea, button { font-family: inherit; }
+input, textarea, button, select { font-family: inherit; }
 textarea { resize: none; }
 
-/* Tweaks panel — design mode only, never shown in normal use */
+/* Tweaks panel — design mode only */
 .tweaks-panel {
   position: fixed; bottom: 16px; right: 16px; z-index: 9999;
   background: #fff; border: 1px solid #D8D6CF;
@@ -66,6 +66,14 @@ textarea { resize: none; }
 .tweak-row input[type=color] { width: 36px; height: 28px; border: none; border-radius: 6px; cursor: pointer; background: none; }
 .tweak-row input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
 
+/* TopBar: hide "Started" time at narrow viewports to prevent clipping */
+@media (max-width: 680px) {
+  .topbar-started { display: none !important; }
+}
+@media (max-width: 520px) {
+  .topbar-latrine-text { display: none !important; }
+}
+
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 2px; }
@@ -76,21 +84,70 @@ textarea { resize: none; }
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 
+// ── Gulper Roster ─────────────────────────────────────────────────────
+const ROSTER_KEY = 'gulper_roster';
+
+const DEFAULT_ROSTER = [
+  { id: 'g_001', last_name: 'Chisale',   first_name: 'Shardreck'   },
+  { id: 'g_002', last_name: 'Chisamba',  first_name: 'James'       },
+  { id: 'g_003', last_name: 'Chiumia',   first_name: 'David'       },
+  { id: 'g_004', last_name: 'Green',     first_name: 'Chilungamo'  },
+  { id: 'g_005', last_name: 'Gwamba',    first_name: 'Ezekiel'     },
+  { id: 'g_006', last_name: 'Gwenya',    first_name: 'Alick'       },
+  { id: 'g_007', last_name: 'Haji',      first_name: 'Francis'     },
+  { id: 'g_008', last_name: 'Jane',      first_name: 'Chirwa'      },
+  { id: 'g_009', last_name: 'Jere',      first_name: 'Lazarus'     },
+  { id: 'g_010', last_name: 'John',      first_name: 'Allan'       },
+  { id: 'g_011', last_name: 'Josam',     first_name: 'Efred'       },
+  { id: 'g_012', last_name: 'Kanyinji',  first_name: 'Joeb'        },
+  { id: 'g_013', last_name: 'Kennedy',   first_name: 'Gwamba'      },
+  { id: 'g_014', last_name: 'Khamba',    first_name: 'Reman'       },
+  { id: 'g_015', last_name: 'Luhanga',   first_name: 'Litania'     },
+  { id: 'g_016', last_name: 'Mathews',   first_name: 'Gondwe'      },
+  { id: 'g_017', last_name: 'Mhwango',   first_name: 'Joseph'      },
+  { id: 'g_018', last_name: 'Mhwango',   first_name: 'Mavuto'      },
+  { id: 'g_019', last_name: 'Msukwa',    first_name: 'Hyce'        },
+  { id: 'g_020', last_name: 'Mwambene',  first_name: 'Willard'     },
+  { id: 'g_021', last_name: 'Nyasuru',   first_name: 'Moses'       },
+  { id: 'g_022', last_name: 'Phiri',     first_name: 'Madaliso'    },
+  { id: 'g_023', last_name: 'Saidi',     first_name: 'Daudi'       },
+  { id: 'g_024', last_name: 'Sinyangwe', first_name: 'Robert'      },
+  { id: 'g_025', last_name: 'Yosefe',    first_name: 'Daudi'       },
+  { id: 'g_026', last_name: 'Zimba',     first_name: 'Mercy'       },
+];
+
+function loadRoster() {
+  try {
+    const raw = localStorage.getItem(ROSTER_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  try { localStorage.setItem(ROSTER_KEY, JSON.stringify(DEFAULT_ROSTER)); } catch(e) {}
+  return DEFAULT_ROSTER;
+}
+function saveRoster(r) {
+  try { localStorage.setItem(ROSTER_KEY, JSON.stringify(r)); } catch(e) {}
+}
+function displayName(g) { return `${g.last_name}, ${g.first_name}`; }
+function nextRosterId(roster) {
+  let max = 0;
+  for (const g of roster) {
+    const m = g.id.match(/^g_(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1]));
+  }
+  return `g_${String(max + 1).padStart(3, '0')}`;
+}
+
 // ── Session persistence ───────────────────────────────────────────────
 const PERSIST_KEY = 'gulper_active_session';
 
-// Load and revive saved session from localStorage. Runs once at module
-// level before React mounts, so all useState calls can read it directly.
 const _SAVED = (() => {
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
     if (!raw) return null;
     const d = JSON.parse(raw);
-    // Revive session.sessionStart (JSON → ISO string → Date)
     if (d.session?.sessionStart) {
       d.session = { ...d.session, sessionStart: new Date(d.session.sessionStart) };
     }
-    // Revive log entry timestamps
     if (Array.isArray(d.gulpers)) {
       d.gulpers = d.gulpers.map(g => ({
         ...g,
@@ -110,9 +167,9 @@ function clearSavedSession() {
   try { localStorage.removeItem(PERSIST_KEY); } catch(e) {}
 }
 
-// ── Default task hierarchy (mutable per session) ─────────────────────
+// ── Default task hierarchy ────────────────────────────────────────────
 const DEFAULT_TASKS = [
-  { id: 'travel',     label: 'Travel',     subtasks: ['Travel to household', 'Travel to disposal site'] },
+  { id: 'travel',     label: 'Travel',     subtasks: ['Travel to disposal site'] },
   { id: 'setup',      label: 'Setup',      subtasks: ['Inspect the pit latrine', 'Client engagement', 'Dig trench', 'Put hole in pit liner'] },
   { id: 'extraction', label: 'Extraction', subtasks: ['Removing sludge', 'Pulling out trash'] },
   { id: 'fluidizing', label: 'Fluidizing', subtasks: ['Adding water'] },
@@ -130,7 +187,6 @@ function fmtTimer(ms, compact = false) {
     ? `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
     : `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${t}`;
 }
-// Handles both Date objects and ISO strings (localStorage revival)
 function fmtWall(d) {
   if (!d) return '—';
   const dt = d instanceof Date ? d : new Date(d);
@@ -154,27 +210,15 @@ function genJobId() {
   localStorage.setItem(storageKey, String(count));
   return `job_${dateStr}_${String(count).padStart(2,'0')}`;
 }
-// Timestamp-based gulper state:
-//   accumulatedMs  — total ms from completed run/pause cycles for current subtask
-//   runningSince   — epoch ms when current run started, null when paused
-//   running        — convenience boolean kept in sync with runningSince
-function newGulper(name) {
-  return { name, taskId: 'travel', subtaskIdx: 0, accumulatedMs: 0, running: false, runningSince: null, log: [] };
+function newGulper(id, name) {
+  return { id, name, taskId: 'travel', subtaskIdx: 0, accumulatedMs: 0, running: false, runningSince: null, log: [] };
 }
-// Compute live elapsed purely from wall clock — correct even after backgrounding
 function liveElapsed(g) {
   return g.runningSince ? g.accumulatedMs + (Date.now() - g.runningSince) : g.accumulatedMs;
-}
-function parseCoords(str) {
-  const m = str.match(/(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)/);
-  return m ? { lat: parseFloat(m[1]), lng: parseFloat(m[2]) } : null;
 }
 function fmtCoords(c) {
   if (!c) return '—';
   return `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`;
-}
-function coordStr(c) {
-  return c ? `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}` : '';
 }
 
 // ── App shell ─────────────────────────────────────────────────────────
@@ -194,22 +238,21 @@ function App() {
   });
   const [tweaksOpen, setTweaksOpen] = useState(false);
 
-  // Initialise all state from saved session if present, otherwise defaults
+  const [roster, setRoster] = useState(() => loadRoster());
+  useEffect(() => { saveRoster(roster); }, [roster]);
+
   const [screen,     setScreen]     = useState(_SAVED?.screen     || 'setup');
   const [isResuming, setIsResuming] = useState(_SAVED?.isResuming || false);
   const [session,    setSession]    = useState(_SAVED?.session     || {
     jobId: '', enumerator: '',
-    gulper1Name: 'Gulper 1', gulper1Home: null,
-    gulper2Name: 'Gulper 2', gulper2Home: null,
+    gulperCount: 2, gulperSelections: [],
     latrineCoords: null, sessionStart: null,
   });
   const [tasks,   setTasks]   = useState(_SAVED?.tasks   || DEFAULT_TASKS);
   const [gulpers, setGulpers] = useState(_SAVED?.gulpers || null);
 
-  // Always holds the latest snapshot — used by event listeners registered once
   const persistRef = useRef(null);
 
-  // Save to localStorage after every state change while a session is active
   useEffect(() => {
     if (gulpers !== null) {
       const snapshot = { screen, session, tasks, gulpers, isResuming };
@@ -218,9 +261,6 @@ function App() {
     }
   }, [screen, session, tasks, gulpers, isResuming]);
 
-  // Register persistent event listeners once.
-  // visibilitychange + beforeunload cover backgrounding / page kill.
-  // 5s heartbeat is belt-and-suspenders insurance.
   useEffect(() => {
     const flush = () => { if (persistRef.current) saveSession(persistRef.current); };
     const onVisibility = () => { if (document.hidden) flush(); };
@@ -244,7 +284,7 @@ function App() {
 
   function startSession(meta) {
     setSession({ ...meta, sessionStart: new Date() });
-    setGulpers([newGulper(meta.gulper1Name), newGulper(meta.gulper2Name)]);
+    setGulpers(meta.gulperSelections.map(g => newGulper(g.id, g.name)));
     setIsResuming(false);
     setScreen('timer');
   }
@@ -254,15 +294,13 @@ function App() {
       ...s,
       enumerator: meta.enumerator,
       jobId: meta.jobId,
-      gulper1Name: meta.gulper1Name,
-      gulper1Home: meta.gulper1Home,
-      gulper2Name: meta.gulper2Name,
-      gulper2Home: meta.gulper2Home,
+      gulperCount: meta.gulperCount,
+      gulperSelections: meta.gulperSelections,
     }));
-    setGulpers(gs => gs.map((g, i) => ({
-      ...g,
-      name: i === 0 ? meta.gulper1Name : meta.gulper2Name,
-    })));
+    setGulpers(gs => gs.map((g, i) => {
+      const sel = meta.gulperSelections[i];
+      return sel ? { ...g, id: sel.id, name: sel.name } : g;
+    }));
     setIsResuming(false);
     setScreen('timer');
   }
@@ -272,13 +310,12 @@ function App() {
     setScreen('setup');
   }
 
-  // Only called when the user finalises and starts a genuinely new session
   function newSession() {
     clearSavedSession();
     persistRef.current = null;
     setGulpers(null);
     setTasks(DEFAULT_TASKS);
-    setSession({ jobId: '', enumerator: '', gulper1Name: 'Gulper 1', gulper1Home: null, gulper2Name: 'Gulper 2', gulper2Home: null, latrineCoords: null, sessionStart: null });
+    setSession({ jobId: '', enumerator: '', gulperCount: 2, gulperSelections: [], latrineCoords: null, sessionStart: null });
     setIsResuming(false);
     setScreen('setup');
   }
@@ -318,6 +355,8 @@ function App() {
           initialValues={isResuming ? session : null}
           onResume={isResuming ? resumeSession : null}
           toggleTheme={toggleTheme}
+          roster={roster}
+          setRoster={setRoster}
         />
       )}
       {screen === 'timer' && gulpers && (
@@ -339,7 +378,6 @@ function App() {
         />
       )}
 
-      {/* Tweaks — design mode only */}
       <div className={`tweaks-panel ${tweaksOpen ? 'open' : ''}`}>
         <h3>Tweaks</h3>
         <div className="tweak-row">
@@ -358,42 +396,45 @@ function App() {
 // ═══════════════════════════════════════════════════════════════════════
 // SCREEN 1 — Setup
 // ═══════════════════════════════════════════════════════════════════════
-function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
+function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, roster, setRoster }) {
   const { dark, accent, bg, surface, surface2, divider, tp, ts } = theme;
   const isResuming = !!onResume;
 
   const [jobId]      = useState(() => initialValues?.jobId || genJobId());
   const [enumerator, setEnumerator] = useState(initialValues?.enumerator || '');
-  const [g1Name, setG1Name] = useState(initialValues?.gulper1Name || 'Gulper 1');
-  const [g1Home, setG1Home] = useState(coordStr(initialValues?.gulper1Home));
-  const [g2Name, setG2Name] = useState(initialValues?.gulper2Name || 'Gulper 2');
-  const [g2Home, setG2Home] = useState(coordStr(initialValues?.gulper2Home));
-  const [locLoading, setLocLoading] = useState(null);
+  // Gulper count fixed during resume to avoid mismatched timer state
+  const [gulperCount, setGulperCount] = useState(initialValues?.gulperCount ?? 2);
+  const [selections, setSelections] = useState(() => {
+    const count = initialValues?.gulperCount ?? 2;
+    const saved = initialValues?.gulperSelections || [];
+    return Array.from({ length: count }, (_, i) => saved[i] || null);
+  });
+  const [rosterOpen, setRosterOpen] = useState(false);
 
-  function getLocation(setter) {
-    if (!navigator.geolocation) return;
-    setLocLoading(setter);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setter(`${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}`);
-        setLocLoading(null);
-      },
-      () => setLocLoading(null),
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+  // Resize selections array when count changes (new session only)
+  useEffect(() => {
+    if (!isResuming) {
+      setSelections(prev => Array.from({ length: gulperCount }, (_, i) => prev[i] || null));
+    }
+  }, [gulperCount]);
+
+  function setSelection(idx, rosterId) {
+    const g = roster.find(r => r.id === rosterId) || null;
+    setSelections(prev => prev.map((s, i) => i === idx ? (g ? { id: g.id, name: displayName(g) } : null) : s));
   }
 
-  const canStart = g1Name.trim() && g2Name.trim();
+  const selectedIds = selections.filter(Boolean).map(s => s.id);
+  const hasDuplicates = selectedIds.length !== new Set(selectedIds).size;
+  const allFilled = selections.every(Boolean);
+  const canStart = allFilled && !hasDuplicates;
 
   function handleStart() {
     if (!canStart) return;
     const meta = {
       jobId,
       enumerator: enumerator.trim(),
-      gulper1Name: g1Name.trim(),
-      gulper1Home: parseCoords(g1Home),
-      gulper2Name: g2Name.trim(),
-      gulper2Home: parseCoords(g2Home),
+      gulperCount,
+      gulperSelections: selections,
       latrineCoords: initialValues?.latrineCoords || null,
     };
     if (onResume) { onResume(meta); } else { onStart(meta); }
@@ -405,31 +446,14 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
     borderRadius: 8, color: tp, fontSize: 15,
     outline: 'none', fontFamily: 'IBM Plex Sans',
   };
+  const selectStyle = {
+    ...inputStyle,
+    appearance: 'none', WebkitAppearance: 'none', cursor: 'pointer',
+    backgroundImage: `url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238A8880' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+    backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center',
+    paddingRight: 36,
+  };
   const labelStyle = { fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts, marginBottom: 5, display: 'block' };
-
-  function GpsField({ value, onChange }) {
-    const isLoading = locLoading === onChange;
-    return (
-      <div style={{ display: 'flex', gap: 6 }}>
-        <input
-          value={value} onChange={e => onChange(e.target.value)}
-          placeholder="lat, lng — e.g. -1.2921, 36.8219"
-          style={{ ...inputStyle, flex: 1, fontFamily: 'IBM Plex Mono', fontSize: 13 }}
-        />
-        <button
-          onClick={() => getLocation(onChange)} disabled={isLoading}
-          title="Use my current location"
-          style={{
-            width: 42, borderRadius: 8, border: `1px solid ${divider}`,
-            background: isLoading ? (dark ? '#2A2820' : '#F0EEE8') : surface2,
-            cursor: isLoading ? 'default' : 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 18, flexShrink: 0,
-          }}
-        >{isLoading ? '…' : '📍'}</button>
-      </div>
-    );
-  }
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '0 0 32px' }}>
@@ -492,26 +516,70 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
         </Section>
 
         {/* Gulpers */}
-        <Section label="Gulpers" theme={theme}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {[
-              { label: 'Gulper 1', name: g1Name, setName: setG1Name, home: g1Home, setHome: setG1Home },
-              { label: 'Gulper 2', name: g2Name, setName: setG2Name, home: g2Home, setHome: setG2Home },
-            ].map((g, i) => (
-              <div key={i} style={{ padding: 14, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', border: `1px solid ${divider}` }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10, color: ts, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{g.label}</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <div>
-                    <label style={labelStyle}>Name *</label>
-                    <input value={g.name} onChange={e => g.setName(e.target.value)} placeholder={g.label} style={inputStyle} />
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Home base GPS</label>
-                    <GpsField value={g.home} onChange={g.setHome} />
-                  </div>
+        <Section
+          label="Gulpers"
+          action={
+            <button onClick={() => setRosterOpen(true)} style={{
+              fontSize: 12, fontWeight: 600, background: 'transparent', border: 'none',
+              cursor: 'pointer', color: ts, padding: 0, textDecoration: 'underline',
+              textDecorationStyle: 'dotted', textUnderlineOffset: 3,
+            }}>Manage roster</button>
+          }
+          theme={theme}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Gulper count selector — fixed during resume */}
+            {!isResuming && (
+              <div>
+                <label style={labelStyle}>Number of gulpers on this job</label>
+                <div style={{ display: 'flex', gap: 6, background: dark ? '#0E0D0B' : '#E0DFD9', borderRadius: 10, padding: 4 }}>
+                  {[1,2,3,4].map(n => (
+                    <button key={n} onClick={() => setGulperCount(n)} style={{
+                      flex: 1, height: 44, borderRadius: 8, border: 'none', cursor: 'pointer',
+                      background: gulperCount === n ? (dark ? '#2C2B26' : '#FFFFFF') : 'transparent',
+                      color: gulperCount === n ? tp : ts,
+                      fontWeight: gulperCount === n ? 700 : 500, fontSize: 17,
+                      boxShadow: gulperCount === n ? '0 1px 5px rgba(0,0,0,0.22)' : 'none',
+                      transition: 'background 0.15s, color 0.15s, box-shadow 0.15s',
+                    }}>{n}</button>
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
+
+            {/* Per-gulper dropdowns */}
+            {selections.map((sel, i) => {
+              const isDupe = sel && selectedIds.filter(id => id === sel.id).length > 1;
+              return (
+                <div key={i}>
+                  <label style={{ ...labelStyle, color: isDupe ? '#CC3333' : ts }}>
+                    Gulper {i + 1}{isDupe ? ' — already selected' : ''}
+                  </label>
+                  <select
+                    value={sel?.id || ''}
+                    onChange={e => setSelection(i, e.target.value)}
+                    style={{ ...selectStyle, borderColor: isDupe ? '#CC3333' : divider }}
+                  >
+                    <option value="">— Select gulper —</option>
+                    {roster.map(g => (
+                      <option
+                        key={g.id}
+                        value={g.id}
+                        disabled={selectedIds.includes(g.id) && sel?.id !== g.id}
+                      >
+                        {displayName(g)} ({g.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
+
+            {hasDuplicates && (
+              <div style={{ fontSize: 13, color: '#CC3333', fontWeight: 600 }}>
+                Each gulper can only appear once per session.
+              </div>
+            )}
           </div>
         </Section>
 
@@ -525,19 +593,208 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme }) {
           {isResuming ? 'Resume Session →' : 'Start Session →'}
         </button>
       </div>
+
+      {rosterOpen && (
+        <RosterManager roster={roster} setRoster={setRoster} theme={theme} onClose={() => setRosterOpen(false)} />
+      )}
     </div>
   );
 }
 
-function Section({ label, children, theme }) {
+function Section({ label, action, children, theme }) {
   const { surface, divider, ts } = theme;
   return (
     <div style={{ background: surface, borderRadius: 12, border: `1px solid ${divider}`, overflow: 'hidden' }}>
-      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>
-        {label}
+      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>{label}</span>
+        {action && action}
       </div>
       <div style={{ padding: 14 }}>{children}</div>
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ROSTER MANAGER
+// ═══════════════════════════════════════════════════════════════════════
+function RosterManager({ roster, setRoster, theme, onClose }) {
+  const { dark, accent, surface, surface2, divider, tp, ts } = theme;
+  const [editingId, setEditingId]     = useState(null);
+  const [editLast,  setEditLast]      = useState('');
+  const [editFirst, setEditFirst]     = useState('');
+  const [addingNew, setAddingNew]     = useState(false);
+  const [newLast,   setNewLast]       = useState('');
+  const [newFirst,  setNewFirst]      = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [pendingImport,   setPendingImport]   = useState(null);
+  const importRef = useRef(null);
+
+  function startEdit(g) {
+    setEditingId(g.id); setEditLast(g.last_name); setEditFirst(g.first_name);
+    setAddingNew(false);
+  }
+  function saveEdit() {
+    if (!editLast.trim() || !editFirst.trim()) return;
+    setRoster(prev => prev.map(g => g.id === editingId
+      ? { ...g, last_name: editLast.trim(), first_name: editFirst.trim() }
+      : g
+    ));
+    setEditingId(null);
+  }
+  function addGulper() {
+    if (!newLast.trim() || !newFirst.trim()) return;
+    const id = nextRosterId(roster);
+    setRoster(prev => [...prev, { id, last_name: newLast.trim(), first_name: newFirst.trim() }]);
+    setNewLast(''); setNewFirst(''); setAddingNew(false);
+  }
+  function doDelete() {
+    setRoster(prev => prev.filter(g => g.id !== confirmDeleteId));
+    setConfirmDeleteId(null);
+  }
+  function exportJSON() {
+    const blob = new Blob([JSON.stringify(roster, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'gulper_roster.json'; a.click();
+  }
+  function handleFileImport(e) {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (!Array.isArray(data)) { alert('Invalid roster file — expected a JSON array'); return; }
+        setPendingImport(data);
+      } catch(err) { alert('Could not parse file as JSON'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  const fieldSt = {
+    flex: 1, padding: '7px 10px',
+    background: surface2, border: `1px solid ${divider}`,
+    borderRadius: 7, color: tp, fontSize: 14, outline: 'none',
+  };
+  const smallBtnSt = (highlight) => ({
+    padding: '6px 12px', borderRadius: 7, border: `1px solid ${highlight ? accent : divider}`,
+    background: highlight ? accent : 'transparent', color: highlight ? '#fff' : ts,
+    cursor: 'pointer', fontSize: 13, fontWeight: highlight ? 700 : 500, flexShrink: 0,
+  });
+
+  return (
+    <>
+      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 500 }} />
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 501,
+        display: 'flex', flexDirection: 'column', background: surface,
+      }}>
+        {/* Header */}
+        <div style={{ padding: '16px 16px 12px', borderBottom: `1px solid ${divider}`, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: ts, fontSize: 20, lineHeight: 1, padding: 0 }}>←</button>
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 17 }}>Manage Gulpers</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={exportJSON} style={smallBtnSt(false)}>Export JSON</button>
+            <button onClick={() => importRef.current?.click()} style={smallBtnSt(false)}>Import JSON</button>
+            <input ref={importRef} type="file" accept=".json" onChange={handleFileImport} style={{ display: 'none' }} />
+          </div>
+        </div>
+
+        {/* List */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {roster.map(g => (
+            <div key={g.id} style={{ padding: '9px 16px', borderBottom: `1px solid ${divider}`, display: 'flex', alignItems: 'center', gap: 8, minHeight: 52 }}>
+              <span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: ts, flexShrink: 0, minWidth: 48 }}>{g.id}</span>
+              {editingId === g.id ? (
+                <>
+                  <input autoFocus value={editLast}  onChange={e => setEditLast(e.target.value)}  placeholder="Last name"  style={fieldSt} />
+                  <input           value={editFirst} onChange={e => setEditFirst(e.target.value)} placeholder="First name" style={fieldSt}
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditingId(null); }} />
+                  <button onClick={saveEdit}              style={smallBtnSt(true)}>Save</button>
+                  <button onClick={() => setEditingId(null)} style={smallBtnSt(false)}>✕</button>
+                </>
+              ) : (
+                <>
+                  <span style={{ flex: 1, fontSize: 15, color: tp }}>{displayName(g)}</span>
+                  <button onClick={() => startEdit(g)} style={smallBtnSt(false)}>Edit</button>
+                  <button onClick={() => setConfirmDeleteId(g.id)} style={{
+                    ...smallBtnSt(false),
+                    border: `1px solid ${dark ? '#4A1F1F' : '#F0CECE'}`,
+                    background: dark ? 'rgba(204,51,51,0.08)' : 'rgba(204,51,51,0.05)',
+                    color: '#CC3333',
+                  }}>Remove</button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Add form */}
+        <div style={{ padding: '12px 16px', borderTop: `1px solid ${divider}`, background: dark ? '#1A1917' : '#F5F4F0', flexShrink: 0 }}>
+          {!addingNew ? (
+            <button onClick={() => setAddingNew(true)} style={{
+              width: '100%', height: 46, borderRadius: 10,
+              border: `1.5px dashed ${divider}`, background: 'transparent',
+              color: ts, cursor: 'pointer', fontSize: 15, fontWeight: 600,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}>
+              <span style={{ fontSize: 20, color: accent, lineHeight: 1 }}>+</span> Add gulper
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input autoFocus value={newLast}  onChange={e => setNewLast(e.target.value)}  placeholder="Last name"  style={fieldSt} />
+              <input           value={newFirst} onChange={e => setNewFirst(e.target.value)} placeholder="First name" style={fieldSt}
+                onKeyDown={e => { if (e.key === 'Enter') addGulper(); }} />
+              <button onClick={addGulper} disabled={!newLast.trim() || !newFirst.trim()} style={smallBtnSt(!!(newLast.trim() && newFirst.trim()))}>Add</button>
+              <button onClick={() => { setAddingNew(false); setNewLast(''); setNewFirst(''); }} style={smallBtnSt(false)}>Cancel</button>
+            </div>
+          )}
+        </div>
+
+        {/* Delete confirmation */}
+        {confirmDeleteId && (
+          <>
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 600 }} />
+            <div style={{
+              position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              zIndex: 601, background: surface, borderRadius: 14,
+              width: 'min(90vw, 340px)', padding: '24px 20px 20px',
+              boxShadow: '0 16px 60px rgba(0,0,0,0.35)',
+            }}>
+              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: tp }}>Remove gulper?</div>
+              <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
+                {(() => { const g = roster.find(r => r.id === confirmDeleteId); return g ? displayName(g) : ''; })()} will be removed from the roster.
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => setConfirmDeleteId(null)} style={{ flex: 1, height: 44, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Cancel</button>
+                <button onClick={doDelete} style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: '#CC3333', cursor: 'pointer', fontWeight: 700, fontSize: 14, color: '#fff' }}>Remove</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Import confirmation */}
+        {pendingImport && (
+          <>
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 600 }} />
+            <div style={{
+              position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              zIndex: 601, background: surface, borderRadius: 14,
+              width: 'min(90vw, 360px)', padding: '24px 20px 20px',
+              boxShadow: '0 16px 60px rgba(0,0,0,0.35)',
+            }}>
+              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: tp }}>Replace roster?</div>
+              <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
+                This will replace the current {roster.length} gulpers with the {pendingImport.length} gulpers from the imported file. This cannot be undone.
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => setPendingImport(null)} style={{ flex: 1, height: 44, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Cancel</button>
+                <button onClick={() => { setRoster(pendingImport); setPendingImport(null); }} style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 14, color: '#fff' }}>Replace</button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -548,8 +805,9 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
   const { divider } = theme;
   const [tick, setTick] = useState(0);
   const [picker, setPicker] = useState({ gulperIdx: null, open: false });
+  const count = gulpers.length;
+  const is4 = count === 4;
 
-  // Drives display updates only — does NOT mutate any timer state
   useEffect(() => {
     const id = setInterval(() => setTick(t => t + 1), 100);
     return () => clearInterval(id);
@@ -571,6 +829,7 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
       const elapsed = liveElapsed(g);
       const oldTask = tasks.find(t => t.id === g.taskId);
       const logEntries = elapsed > 2000 ? [{
+        gulper_id: g.id || null,
         gulper: g.name,
         task: oldTask?.label,
         subtask: oldTask?.subtasks[g.subtaskIdx] || oldTask?.label,
@@ -588,31 +847,29 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
     );
   }
 
-  function handleBackToSetup() {
-    setGulpers(pauseAll);
-    onBackToSetup();
-  }
-
-  function handleEnd() {
-    setGulpers(pauseAll);
-    onEnd();
-  }
+  function handleBackToSetup() { setGulpers(pauseAll); onBackToSetup(); }
+  function handleEnd()         { setGulpers(pauseAll); onEnd(); }
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <TopBar
         session={session} setSession={setSession}
-        onEnd={handleEnd}
-        onBackToSetup={handleBackToSetup}
-        toggleTheme={toggleTheme}
-        theme={theme}
+        onEnd={handleEnd} onBackToSetup={handleBackToSetup}
+        toggleTheme={toggleTheme} theme={theme}
       />
 
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', gap: 1, background: divider }}>
+      <div style={{
+        flex: 1, overflow: 'hidden', background: divider,
+        ...(is4
+          ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', gap: '1px' }
+          : { display: 'flex', gap: '1px' }
+        ),
+      }}>
         {gulpers.map((g, idx) => (
           <GulperPanel
             key={idx} gulper={g} idx={idx} tasks={tasks}
             elapsed={liveElapsed(g)}
+            gulperCount={count}
             onToggle={() => toggleTimer(idx)}
             onNextAndPick={() => {
               setGulpers(gs => gs.map((g, i) => {
@@ -620,7 +877,7 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
                 const task = tasks.find(t => t.id === g.taskId);
                 const elapsed = liveElapsed(g);
                 const subtaskLabel = task.subtasks.length > 0 ? task.subtasks[g.subtaskIdx] : task.label;
-                const entry = { gulper: g.name, task: task.label, subtask: subtaskLabel, ms: elapsed, ts: new Date() };
+                const entry = { gulper_id: g.id || null, gulper: g.name, task: task.label, subtask: subtaskLabel, ms: elapsed, ts: new Date() };
                 return { ...g, running: false, accumulatedMs: 0, runningSince: null, log: [entry, ...g.log] };
               }));
               setPicker({ gulperIdx: idx, open: true });
@@ -649,7 +906,7 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
 function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme }) {
   const { dark, surface, divider, tp, ts, accent } = theme;
   const [gpsLoading, setGpsLoading] = useState(false);
-  const [gpsToast, setGpsToast] = useState(null);
+  const [gpsToast,   setGpsToast]   = useState(null);
 
   function captureLatrine() {
     if (!navigator.geolocation) return;
@@ -667,63 +924,63 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
     );
   }
 
-  const hasCoordsLatrine = !!session.latrineCoords;
+  const hasLatrine = !!session.latrineCoords;
 
   return (
     <>
       <div style={{
-        height: 56, display: 'flex', alignItems: 'center',
-        padding: '0 10px', background: surface, borderBottom: `1px solid ${divider}`,
-        flexShrink: 0, gap: 6,
+        height: 52, display: 'flex', alignItems: 'center',
+        padding: '0 8px', background: surface, borderBottom: `1px solid ${divider}`,
+        flexShrink: 0, gap: 4, overflow: 'hidden',
       }}>
         <button onClick={onBackToSetup} style={{
           display: 'flex', alignItems: 'center', gap: 3,
-          padding: '6px 10px', borderRadius: 7, border: `1px solid ${divider}`,
+          padding: '5px 8px', borderRadius: 7, border: `1px solid ${divider}`,
           background: 'transparent', cursor: 'pointer',
-          color: ts, fontSize: 13, fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap',
+          color: ts, fontSize: 12, fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap',
         }}>← Setup</button>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 3, minWidth: 0, flex: 1, overflow: 'hidden' }}>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts, flexShrink: 0 }}>Job</span>
-          <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, fontWeight: 600, color: tp, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.jobId}</span>
+          <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 11, fontWeight: 600, color: tp, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.jobId}</span>
         </div>
 
         <button onClick={captureLatrine}
-          title={hasCoordsLatrine ? `Latrine: ${fmtCoords(session.latrineCoords)} — tap to update` : 'Capture pit latrine GPS'}
+          title={hasLatrine ? `Latrine: ${fmtCoords(session.latrineCoords)} — tap to update` : 'Capture pit latrine GPS'}
           style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            padding: '4px 10px', borderRadius: 6, border: `1px solid ${hasCoordsLatrine ? accent : divider}`,
-            background: hasCoordsLatrine ? (dark ? 'rgba(232,160,32,0.1)' : 'rgba(232,160,32,0.07)') : 'transparent',
+            display: 'flex', alignItems: 'center', gap: 4,
+            padding: '4px 8px', borderRadius: 6, border: `1px solid ${hasLatrine ? accent : divider}`,
+            background: hasLatrine ? (dark ? 'rgba(232,160,32,0.1)' : 'rgba(232,160,32,0.07)') : 'transparent',
             cursor: 'pointer', flexShrink: 0,
           }}
         >
-          <span style={{ fontSize: 14 }}>{gpsLoading ? '…' : '📍'}</span>
-          <span style={{ fontSize: 11, fontWeight: 600, color: hasCoordsLatrine ? accent : ts, whiteSpace: 'nowrap' }}>
-            {gpsLoading ? 'Getting…' : hasCoordsLatrine ? 'Latrine ✓' : 'Latrine GPS'}
+          <span style={{ fontSize: 13 }}>{gpsLoading ? '…' : '📍'}</span>
+          <span className="topbar-latrine-text" style={{ fontSize: 11, fontWeight: 600, color: hasLatrine ? accent : ts, whiteSpace: 'nowrap' }}>
+            {gpsLoading ? 'Getting…' : hasLatrine ? 'Latrine ✓' : 'Latrine GPS'}
           </span>
         </button>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+        <div className="topbar-started" style={{ display: 'flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
           <span style={{ fontSize: 10, color: ts }}>Started</span>
           <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 11, fontWeight: 600, color: tp }}>{fmtWall(session.sessionStart)}</span>
         </div>
 
         <button onClick={toggleTheme} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{
-          width: 36, height: 36, borderRadius: 8, border: `1px solid ${divider}`,
+          width: 34, height: 34, borderRadius: 8, border: `1px solid ${divider}`,
           background: 'transparent', cursor: 'pointer', flexShrink: 0,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17,
         }}>{dark ? '☀️' : '🌙'}</button>
 
         <button onClick={onEnd} style={{
-          height: 42, padding: '0 16px', borderRadius: 8,
+          height: 40, padding: '0 14px', borderRadius: 8,
           border: 'none', background: '#CC3333', color: '#fff',
-          fontWeight: 700, fontSize: 14, cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap',
+          fontWeight: 700, fontSize: 13, cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap',
         }}>End Session</button>
       </div>
 
       {gpsToast && (
         <div style={{
-          position: 'fixed', top: 64, left: '50%', transform: 'translateX(-50%)',
+          position: 'fixed', top: 60, left: '50%', transform: 'translateX(-50%)',
           background: dark ? '#2A2820' : '#1A1917', color: '#fff',
           borderRadius: 8, padding: '8px 16px', fontSize: 12, fontWeight: 500,
           boxShadow: '0 4px 20px rgba(0,0,0,0.3)', pointerEvents: 'none', zIndex: 300,
@@ -734,35 +991,43 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
   );
 }
 
-function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onPickTask, theme }) {
+function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onPickTask, theme, gulperCount }) {
   const { dark, accent, surface, divider, tp, ts } = theme;
   const task = tasks.find(t => t.id === gulper.taskId) || tasks[0];
   const hasSubtasks = task.subtasks.length > 0;
   const subtaskLabel = hasSubtasks ? task.subtasks[gulper.subtaskIdx] : null;
-  const taskIdx = tasks.findIndex(t => t.id === gulper.taskId);
-  const isLast = !hasSubtasks && taskIdx === tasks.length - 1;
   const logBg = dark ? '#181714' : '#F0EFE8';
 
+  // Scale UI for 3 or 4 gulpers
+  const sz = gulperCount <= 2 ? 'normal' : gulperCount === 3 ? 'compact' : 'mini';
+  const nameFontSize    = { normal: 26, compact: 20, mini: 18 }[sz];
+  const taskFontSize    = { normal: 26, compact: 20, mini: 18 }[sz];
+  const subtaskFontSize = { normal: 18, compact: 14, mini: 13 }[sz];
+  const timerFontSize   = { normal: 'clamp(30px, 6vw, 50px)', compact: 'clamp(22px, 4.5vw, 38px)', mini: 'clamp(18px, 4vw, 32px)' }[sz];
+  const btnHeight       = { normal: 52, compact: 44, mini: 40 }[sz];
+  const nextBtnHeight   = { normal: 56, compact: 46, mini: 42 }[sz];
+  const padH            = { normal: 14, compact: 10, mini: 8  }[sz];
+
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: surface, overflow: 'hidden' }}>
-      <div style={{ padding: '10px 14px 8px', borderBottom: `1px solid ${divider}`, flexShrink: 0, position: 'relative' }}>
-        <div style={{ textAlign: 'center', fontWeight: 700, fontSize: 26, color: tp, letterSpacing: '-0.01em', lineHeight: 1.15 }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: surface, overflow: 'hidden', minWidth: 0 }}>
+      <div style={{ padding: `8px ${padH}px 6px`, borderBottom: `1px solid ${divider}`, flexShrink: 0, position: 'relative' }}>
+        <div style={{ textAlign: 'center', fontWeight: 700, fontSize: nameFontSize, color: tp, letterSpacing: '-0.01em', lineHeight: 1.15, paddingRight: 20 }}>
           {gulper.name}
         </div>
-        <div style={{ position: 'absolute', top: '50%', right: 14, transform: 'translateY(-50%)' }}>
+        <div style={{ position: 'absolute', top: '50%', right: padH, transform: 'translateY(-50%)' }}>
           <StatusDot running={gulper.running} accent={accent} />
         </div>
       </div>
 
-      <div style={{ padding: '8px 14px 4px', flexShrink: 0 }}>
-        <button onClick={onPickTask} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6, color: tp }}>
-          <span style={{ fontSize: 26, fontWeight: 700 }}>{task.label}</span>
-          <span style={{ fontSize: 14, color: ts, marginTop: 3 }}>▾</span>
+      <div style={{ padding: `6px ${padH}px 3px`, flexShrink: 0 }}>
+        <button onClick={onPickTask} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0', display: 'flex', alignItems: 'center', gap: 5, color: tp, maxWidth: '100%' }}>
+          <span style={{ fontSize: taskFontSize, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.label}</span>
+          <span style={{ fontSize: 13, color: ts, marginTop: 2, flexShrink: 0 }}>▾</span>
         </button>
         {hasSubtasks && (
-          <div style={{ fontSize: 18, fontWeight: 600, color: tp, marginTop: 2, paddingLeft: 2 }}>
+          <div style={{ fontSize: subtaskFontSize, fontWeight: 600, color: tp, marginTop: 1, paddingLeft: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {subtaskLabel}
-            <span style={{ color: dark ? '#555' : '#C0BDB4', marginLeft: 8, fontSize: 13, fontWeight: 400 }}>
+            <span style={{ color: dark ? '#555' : '#C0BDB4', marginLeft: 6, fontSize: Math.round(subtaskFontSize * 0.75), fontWeight: 400 }}>
               {gulper.subtaskIdx + 1}/{task.subtasks.length}
             </span>
           </div>
@@ -770,56 +1035,57 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
       </div>
 
       <div style={{
-        margin: '6px 14px 8px', borderRadius: 10, padding: '12px 14px',
+        margin: `4px ${padH}px 6px`, borderRadius: 10, padding: '10px 12px',
         background: gulper.running ? (dark ? 'rgba(232,160,32,0.1)' : 'rgba(232,160,32,0.07)') : (dark ? '#1A1917' : '#F5F4F0'),
         border: `2px solid ${gulper.running ? accent : 'transparent'}`,
         transition: 'border-color 0.2s, background 0.2s', flexShrink: 0,
       }}>
         <div style={{
-          fontFamily: 'IBM Plex Mono', fontSize: 'clamp(30px, 6vw, 50px)', fontWeight: 700,
+          fontFamily: 'IBM Plex Mono', fontSize: timerFontSize, fontWeight: 700,
           letterSpacing: '-0.02em', color: gulper.running ? accent : tp, lineHeight: 1, transition: 'color 0.2s',
         }}>{fmtTimer(elapsed)}</div>
       </div>
 
-      <div style={{ padding: '0 14px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+      <div style={{ padding: `0 ${padH}px`, display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
         <button onClick={onToggle} style={{
-          height: 52, borderRadius: 10, border: 'none', cursor: 'pointer',
+          height: btnHeight, borderRadius: 10, border: 'none', cursor: 'pointer',
           background: gulper.running ? (dark ? '#2A2820' : '#FFF3DC') : accent,
           color: gulper.running ? accent : '#fff',
-          fontWeight: 700, fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          fontWeight: 700, fontSize: sz === 'normal' ? 16 : 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
         }}>
           {gulper.running ? <><PauseIcon color={accent} /> Pause</> : <><PlayIcon color="#fff" /> Resume</>}
         </button>
-        <button onClick={onNextAndPick} disabled={isLast} style={{
-          height: 56, borderRadius: 10,
-          border: `1.5px solid ${isLast ? divider : (dark ? '#3A3930' : '#D8D6CD')}`,
-          cursor: isLast ? 'default' : 'pointer', background: 'transparent',
-          color: isLast ? (dark ? '#444' : '#C0BDB4') : tp,
-          fontWeight: 600, fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        {/* Always enabled — Rest and Disposal both need to log and open picker */}
+        <button onClick={onNextAndPick} style={{
+          height: nextBtnHeight, borderRadius: 10,
+          border: `1.5px solid ${dark ? '#3A3930' : '#D8D6CD'}`,
+          cursor: 'pointer', background: 'transparent', color: tp,
+          fontWeight: 600, fontSize: sz === 'normal' ? 15 : 13,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
         }}>
-          <NextIcon color={isLast ? (dark ? '#444' : '#C0BDB4') : tp} />
+          <NextIcon color={tp} />
           Done — select next task
         </button>
       </div>
 
-      <div style={{ flex: 1, overflow: 'hidden', margin: '10px 0 0', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '0 14px 4px', flexShrink: 0 }}>
+      <div style={{ flex: 1, overflow: 'hidden', margin: '8px 0 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ padding: `0 ${padH}px 3px`, flexShrink: 0 }}>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ts }}>
             Log · {gulper.log.length} {gulper.log.length === 1 ? 'entry' : 'entries'}
           </span>
         </div>
         <div style={{ flex: 1, overflowY: 'auto', background: logBg, borderTop: `1px solid ${divider}` }}>
           {gulper.log.length === 0
-            ? <div style={{ padding: '12px 14px', fontSize: 12, color: ts, fontStyle: 'italic' }}>No entries yet</div>
+            ? <div style={{ padding: `10px ${padH}px`, fontSize: 11, color: ts, fontStyle: 'italic' }}>No entries yet</div>
             : gulper.log.map((entry, ei) => (
-              <div key={ei} style={{ padding: '7px 14px', borderBottom: `1px solid ${divider}`, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6 }}>
+              <div key={ei} style={{ padding: `6px ${padH}px`, borderBottom: `1px solid ${divider}`, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 4 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: tp, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: tp, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {entry.subtask && entry.subtask !== entry.task ? `${entry.task} · ${entry.subtask}` : entry.task}
                   </span>
                   <span style={{ fontSize: 10, color: ts }}>{new Date(entry.ts).toTimeString().slice(0,8)}</span>
                 </div>
-                <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 13, fontWeight: 600, color: tp, flexShrink: 0 }}>
+                <span style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, fontWeight: 600, color: tp, flexShrink: 0 }}>
                   {fmtTimer(entry.ms, true)}
                 </span>
               </div>
@@ -963,9 +1229,15 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
   const initEntries = () => {
     const entries = [];
     gulpers.forEach(g => {
-      g.log.forEach(e => entries.push({ ...e, gulper: e.gulper || g.name, inProgress: false, note: '' }));
+      g.log.forEach(e => entries.push({
+        ...e,
+        gulper_id: e.gulper_id || g.id || null,
+        gulper: e.gulper || g.name,
+        inProgress: false, note: '',
+      }));
       const task = tasks.find(t => t.id === g.taskId);
       entries.push({
+        gulper_id: g.id || null,
         gulper: g.name,
         task: task?.label || g.taskId,
         subtask: task?.subtasks[g.subtaskIdx] || task?.label || '',
@@ -976,31 +1248,32 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     return entries;
   };
 
-  const [entries, setEntries] = useState(initEntries);
+  const [entries,    setEntries]    = useState(initEntries);
   const [globalNote, setGlobalNote] = useState('');
-  const [toast, setToast] = useState(null);
+  const [toast,      setToast]      = useState(null);
   const [hasExported, setHasExported] = useState(false);
-  const [confirmNew, setConfirmNew] = useState(false);
+  const [confirmNew,  setConfirmNew]  = useState(false);
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 3500); }
+
+  const gulperSelections = session.gulperSelections || [];
 
   function buildSessionInfoRows() {
     const rows = [];
     rows.push(['SESSION INFORMATION', '']);
-    rows.push(['Job ID', session.jobId || '']);
-    rows.push(['Enumerator', session.enumerator || '']);
-    rows.push(['Session Start', fmtLocalDate(session.sessionStart), fmtLocalTime(session.sessionStart)]);
-    rows.push(['Session End', fmtLocalDate(new Date()), fmtLocalTime(new Date())]);
+    rows.push(['Job ID',         session.jobId || '']);
+    rows.push(['Enumerator',     session.enumerator || '']);
+    rows.push(['Session Start',  fmtLocalDate(session.sessionStart), fmtLocalTime(session.sessionStart)]);
+    rows.push(['Session End',    fmtLocalDate(new Date()), fmtLocalTime(new Date())]);
     rows.push(['Pit Latrine GPS', fmtCoords(session.latrineCoords)]);
-    rows.push([session.gulper1Name + ' Home GPS', fmtCoords(session.gulper1Home)]);
-    rows.push([session.gulper2Name + ' Home GPS', fmtCoords(session.gulper2Home)]);
-    rows.push(['Session Notes', globalNote || '']);
+    gulperSelections.forEach((g, i) => rows.push([`Gulper ${i+1}`, g.name, g.id || '']));
+    rows.push(['Session Notes',  globalNote || '']);
     rows.push([]);
     rows.push(['TASK SUMMARY', '', '', '']);
     rows.push(['Gulper', 'Task', 'Subtask', 'Total Time (s)']);
     const summary = {};
     entries.forEach(e => {
-      const key = `${e.gulper || ''}||${e.task || ''}||${e.subtask || ''}`;
+      const key = `${e.gulper||''}||${e.task||''}||${e.subtask||''}`;
       summary[key] = (summary[key] || 0) + (e.ms || 0);
     });
     Object.entries(summary).forEach(([key, ms]) => {
@@ -1011,11 +1284,14 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
   }
 
   function buildTimeLogRows() {
-    const header = ['Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
+    const header = ['Gulper ID', 'Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
     const data = entries.map(e => {
       const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
       return [
-        e.gulper || '', e.task || '', e.subtask || '',
+        e.gulper_id || '',
+        e.gulper   || '',
+        e.task     || '',
+        e.subtask  || '',
         ((e.ms||0)/1000).toFixed(1),
         fmtLocalDate(dt), fmtLocalTime(dt),
         e.note || '',
@@ -1040,22 +1316,19 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
   function exportXLSX() {
     if (typeof XLSX === 'undefined') { showToast('Excel library not loaded — check connection'); return; }
 
-    // Sheet 1: clean key/value session metadata
     const infoData = [
       ['Field', 'Value'],
-      ['Job ID', session.jobId || ''],
-      ['Enumerator', session.enumerator || ''],
-      ['Date', fmtLocalDate(session.sessionStart)],
-      ['Session Start', fmtLocalTime(session.sessionStart)],
-      ['Session End', fmtLocalTime(new Date())],
+      ['Job ID',          session.jobId || ''],
+      ['Enumerator',      session.enumerator || ''],
+      ['Date',            fmtLocalDate(session.sessionStart)],
+      ['Session Start',   fmtLocalTime(session.sessionStart)],
+      ['Session End',     fmtLocalTime(new Date())],
       ['Pit Latrine GPS', fmtCoords(session.latrineCoords)],
-      [session.gulper1Name + ' Home GPS', fmtCoords(session.gulper1Home)],
-      [session.gulper2Name + ' Home GPS', fmtCoords(session.gulper2Home)],
-      ['Session Notes', globalNote || ''],
+      ...gulperSelections.map((g, i) => [`Gulper ${i+1}`, g.name]),
+      ['Session Notes',   globalNote || ''],
     ];
 
-    // Sheet 2: same columns as CSV, sorted chronologically by task start time
-    const logHeader = ['Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
+    const logHeader = ['Gulper ID', 'Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
     const sortedEntries = [...entries].sort((a, b) => {
       const aStart = new Date(a.ts).getTime() - (a.ms || 0);
       const bStart = new Date(b.ts).getTime() - (b.ms || 0);
@@ -1064,7 +1337,10 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     const logData = sortedEntries.map(e => {
       const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
       return [
-        e.gulper || '', e.task || '', e.subtask || '',
+        e.gulper_id || '',
+        e.gulper    || '',
+        e.task      || '',
+        e.subtask   || '',
         ((e.ms || 0) / 1000).toFixed(1),
         fmtLocalDate(dt), fmtLocalTime(dt),
         e.note || '',
@@ -1081,8 +1357,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
   }
 
   function handleNewSession() {
-    if (!hasExported) { setConfirmNew(true); }
-    else { onNewSession(); }
+    if (!hasExported) { setConfirmNew(true); } else { onNewSession(); }
   }
 
   const inpSt = {
@@ -1113,13 +1388,12 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
             <div style={{ padding: '10px 14px', borderBottom: `1px solid ${divider}`, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: ts }}>Session Info</div>
             <div style={{ padding: '14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
               {[
-                ['Job ID', session.jobId || '—'],
-                ['Enumerator', session.enumerator || '—'],
-                ['Started', fmtWall(session.sessionStart)],
-                ['Ended', fmtWall(new Date())],
+                ['Job ID',         session.jobId || '—'],
+                ['Enumerator',     session.enumerator || '—'],
+                ['Started',        fmtWall(session.sessionStart)],
+                ['Ended',          fmtWall(new Date())],
                 ['Pit latrine GPS', fmtCoords(session.latrineCoords)],
-                [session.gulper1Name + ' home', fmtCoords(session.gulper1Home)],
-                [session.gulper2Name + ' home', fmtCoords(session.gulper2Home)],
+                ...gulperSelections.map((g, i) => [`Gulper ${i+1}`, g.name]),
               ].map(([label, val], i) => (
                 <div key={i}>
                   <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: ts, marginBottom: 3 }}>{label}</div>
@@ -1145,7 +1419,6 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
         </div>
       </div>
 
-      {/* Bottom action bar */}
       <div style={{ padding: '12px 16px 20px', background: surface, borderTop: `1px solid ${divider}`, display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
         <button onClick={exportXLSX} style={{
           height: 58, borderRadius: 12, border: 'none',
@@ -1178,7 +1451,6 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
         }}>{toast}</div>
       )}
 
-      {/* Confirmation: start new session without exporting */}
       {confirmNew && (
         <>
           <div onClick={() => setConfirmNew(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 400 }} />
