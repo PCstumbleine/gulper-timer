@@ -220,6 +220,12 @@ function fmtCoords(c) {
   if (!c) return '—';
   return `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`;
 }
+// Strip g_ prefix for export — g_001 → 1, g_026 → 26. Falls back to raw value.
+function rosterIdToInt(id) {
+  if (!id) return '';
+  const m = id.match(/^g_(\d+)$/);
+  return m ? parseInt(m[1], 10) : id;
+}
 
 // ── App shell ─────────────────────────────────────────────────────────
 function App() {
@@ -567,7 +573,7 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, ros
                         value={g.id}
                         disabled={selectedIds.includes(g.id) && sel?.id !== g.id}
                       >
-                        {displayName(g)} ({g.id})
+                        {displayName(g)}
                       </option>
                     ))}
                   </select>
@@ -699,6 +705,32 @@ function RosterManager({ roster, setRoster, theme, onClose }) {
           </div>
         </div>
 
+        {/* Add form — kept at top so keyboard opening doesn't hide it */}
+        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${divider}`, background: dark ? '#1A1917' : '#F5F4F0', flexShrink: 0 }}>
+          {!addingNew ? (
+            <button onClick={() => setAddingNew(true)} style={{
+              width: '100%', height: 46, borderRadius: 10,
+              border: `1.5px dashed ${divider}`, background: 'transparent',
+              color: ts, cursor: 'pointer', fontSize: 15, fontWeight: 600,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}>
+              <span style={{ fontSize: 20, color: accent, lineHeight: 1 }}>+</span> Add gulper
+            </button>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input autoFocus value={newLast}  onChange={e => setNewLast(e.target.value)}  placeholder="Last name"  style={fieldSt} />
+                <input           value={newFirst} onChange={e => setNewFirst(e.target.value)} placeholder="First name" style={fieldSt}
+                  onKeyDown={e => { if (e.key === 'Enter') addGulper(); }} />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={addGulper} disabled={!newLast.trim() || !newFirst.trim()} style={{ ...smallBtnSt(!!(newLast.trim() && newFirst.trim())), flex: 1, height: 44 }}>Add</button>
+                <button onClick={() => { setAddingNew(false); setNewLast(''); setNewFirst(''); }} style={{ ...smallBtnSt(false), flex: 1, height: 44 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* List */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {roster.map(g => (
@@ -726,28 +758,6 @@ function RosterManager({ roster, setRoster, theme, onClose }) {
               )}
             </div>
           ))}
-        </div>
-
-        {/* Add form */}
-        <div style={{ padding: '12px 16px', borderTop: `1px solid ${divider}`, background: dark ? '#1A1917' : '#F5F4F0', flexShrink: 0 }}>
-          {!addingNew ? (
-            <button onClick={() => setAddingNew(true)} style={{
-              width: '100%', height: 46, borderRadius: 10,
-              border: `1.5px dashed ${divider}`, background: 'transparent',
-              color: ts, cursor: 'pointer', fontSize: 15, fontWeight: 600,
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-            }}>
-              <span style={{ fontSize: 20, color: accent, lineHeight: 1 }}>+</span> Add gulper
-            </button>
-          ) : (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input autoFocus value={newLast}  onChange={e => setNewLast(e.target.value)}  placeholder="Last name"  style={fieldSt} />
-              <input           value={newFirst} onChange={e => setNewFirst(e.target.value)} placeholder="First name" style={fieldSt}
-                onKeyDown={e => { if (e.key === 'Enter') addGulper(); }} />
-              <button onClick={addGulper} disabled={!newLast.trim() || !newFirst.trim()} style={smallBtnSt(!!(newLast.trim() && newFirst.trim()))}>Add</button>
-              <button onClick={() => { setAddingNew(false); setNewLast(''); setNewFirst(''); }} style={smallBtnSt(false)}>Cancel</button>
-            </div>
-          )}
         </div>
 
         {/* Delete confirmation */}
@@ -1288,7 +1298,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     const data = entries.map(e => {
       const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
       return [
-        e.gulper_id || '',
+        rosterIdToInt(e.gulper_id),
         e.gulper   || '',
         e.task     || '',
         e.subtask  || '',
@@ -1337,7 +1347,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     const logData = sortedEntries.map(e => {
       const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
       return [
-        e.gulper_id || '',
+        rosterIdToInt(e.gulper_id),
         e.gulper    || '',
         e.task      || '',
         e.subtask   || '',
