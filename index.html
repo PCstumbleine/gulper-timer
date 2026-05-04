@@ -87,34 +87,7 @@ const { useState, useEffect, useRef } = React;
 // ── Gulper Roster ─────────────────────────────────────────────────────
 const ROSTER_KEY = 'gulper_roster';
 
-const DEFAULT_ROSTER = [
-  { id: 'g_001', last_name: '***REDACTED***',   first_name: '***REDACTED***'   },
-  { id: 'g_002', last_name: '***REDACTED***',  first_name: '***REDACTED***'       },
-  { id: 'g_003', last_name: '***REDACTED***',   first_name: '***REDACTED***'       },
-  { id: 'g_004', last_name: '***REDACTED***',     first_name: '***REDACTED***'  },
-  { id: 'g_005', last_name: '***REDACTED***',    first_name: '***REDACTED***'     },
-  { id: 'g_006', last_name: '***REDACTED***',    first_name: '***REDACTED***'       },
-  { id: 'g_007', last_name: '***REDACTED***',      first_name: '***REDACTED***'     },
-  { id: 'g_008', last_name: '***REDACTED***',      first_name: '***REDACTED***'      },
-  { id: 'g_009', last_name: '***REDACTED***',      first_name: '***REDACTED***'     },
-  { id: 'g_010', last_name: '***REDACTED***',      first_name: '***REDACTED***'       },
-  { id: 'g_011', last_name: '***REDACTED***',     first_name: '***REDACTED***'       },
-  { id: 'g_012', last_name: '***REDACTED***',  first_name: '***REDACTED***'        },
-  { id: 'g_013', last_name: '***REDACTED***',   first_name: '***REDACTED***'      },
-  { id: 'g_014', last_name: '***REDACTED***',    first_name: '***REDACTED***'       },
-  { id: 'g_015', last_name: '***REDACTED***',   first_name: '***REDACTED***'     },
-  { id: 'g_016', last_name: '***REDACTED***',   first_name: '***REDACTED***'      },
-  { id: 'g_017', last_name: '***REDACTED***',   first_name: '***REDACTED***'      },
-  { id: 'g_018', last_name: '***REDACTED***',   first_name: '***REDACTED***'      },
-  { id: 'g_019', last_name: '***REDACTED***',    first_name: '***REDACTED***'        },
-  { id: 'g_020', last_name: '***REDACTED***',  first_name: '***REDACTED***'     },
-  { id: 'g_021', last_name: '***REDACTED***',   first_name: '***REDACTED***'       },
-  { id: 'g_022', last_name: '***REDACTED***',     first_name: '***REDACTED***'    },
-  { id: 'g_023', last_name: '***REDACTED***',     first_name: '***REDACTED***'       },
-  { id: 'g_024', last_name: '***REDACTED***', first_name: '***REDACTED***'      },
-  { id: 'g_025', last_name: '***REDACTED***',    first_name: '***REDACTED***'       },
-  { id: 'g_026', last_name: '***REDACTED***',     first_name: '***REDACTED***'       },
-];
+const DEFAULT_ROSTER = [];
 
 function loadRoster() {
   try {
@@ -550,6 +523,17 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, ros
                     }}>{n}</button>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Empty-roster notice */}
+            {roster.length === 0 && (
+              <div style={{ padding: '12px 14px', borderRadius: 8, background: dark ? 'rgba(232,160,32,0.08)' : 'rgba(232,160,32,0.06)', border: `1px solid ${dark ? 'rgba(232,160,32,0.2)' : 'rgba(232,160,32,0.25)'}`, fontSize: 14, color: ts, lineHeight: 1.5 }}>
+                No gulpers in the roster yet.{' '}
+                <button onClick={() => setRosterOpen(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: accent, fontWeight: 700, fontSize: 14, padding: 0 }}>
+                  Open Manage Gulpers
+                </button>
+                {' '}to add them before starting a session.
               </div>
             )}
 
