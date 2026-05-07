@@ -141,16 +141,30 @@ function clearSavedSession() {
 }
 
 // ── Default task hierarchy ────────────────────────────────────────────
+const TASK_HIERARCHY_KEY = 'task_hierarchy';
+
 const DEFAULT_TASKS = [
-  { id: 'travel',     label: 'Travel',     subtasks: ['Travel to disposal site'] },
   { id: 'setup',      label: 'Setup',      subtasks: ['Inspect the pit latrine', 'Client engagement', 'Dig trench', 'Put hole in pit liner'] },
   { id: 'extraction', label: 'Extraction', subtasks: ['Removing sludge', 'Pulling out trash'] },
   { id: 'fluidizing', label: 'Fluidizing', subtasks: ['Adding water'] },
   { id: 'cleaning',   label: 'Cleaning',   subtasks: ['Washing slab', 'Tidying area'] },
   { id: 'completion', label: 'Completion', subtasks: ['Repair pit liner', 'Fill trench', 'Containerization', 'Clean equipment', 'Client engagement', 'Container transport'] },
-  { id: 'rest',       label: 'Rest',       subtasks: [] },
+  { id: 'travel',     label: 'Travel',     subtasks: ['Travel to disposal site'] },
   { id: 'disposal',   label: 'Disposal',   subtasks: [] },
+  { id: 'rest',       label: 'Rest',       subtasks: [] },
 ];
+
+function loadTasks() {
+  try {
+    const raw = localStorage.getItem(TASK_HIERARCHY_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  saveTasks(DEFAULT_TASKS);
+  return DEFAULT_TASKS;
+}
+function saveTasks(t) {
+  try { localStorage.setItem(TASK_HIERARCHY_KEY, JSON.stringify(t)); } catch(e) {}
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────
 function fmtTimer(ms, compact = false) {
@@ -168,7 +182,10 @@ function fmtWall(d) {
 function fmtLocalDate(d) {
   if (!d) return '';
   const dt = d instanceof Date ? d : new Date(d);
-  return dt.toLocaleDateString('en-GB');
+  const y  = dt.getFullYear();
+  const mo = String(dt.getMonth() + 1).padStart(2, '0');
+  const dy = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${dy}`;
 }
 function fmtLocalTime(d) {
   if (!d) return '';
@@ -177,11 +194,11 @@ function fmtLocalTime(d) {
 }
 function genJobId() {
   const today = new Date();
-  const dateStr = `${today.getFullYear()}.${String(today.getMonth()+1).padStart(2,'0')}.${String(today.getDate()).padStart(2,'0')}`;
+  const dateStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
   const storageKey = `gulper_job_count_${dateStr}`;
   const count = parseInt(localStorage.getItem(storageKey) || '0') + 1;
   localStorage.setItem(storageKey, String(count));
-  return `job_${dateStr}_${String(count).padStart(2,'0')}`;
+  return `${dateStr}_${String(count).padStart(2,'0')}`;
 }
 function newGulper(id, name) {
   return { id, name, taskId: 'travel', subtaskIdx: 0, accumulatedMs: 0, running: false, runningSince: null, log: [] };
@@ -227,7 +244,8 @@ function App() {
     gulperCount: 2, gulperSelections: [],
     latrineCoords: null, sessionStart: null,
   });
-  const [tasks,   setTasks]   = useState(_SAVED?.tasks   || DEFAULT_TASKS);
+  const [tasks,   setTasks]   = useState(() => loadTasks());
+  useEffect(() => { saveTasks(tasks); }, [tasks]);
   const [gulpers, setGulpers] = useState(_SAVED?.gulpers || null);
 
   const persistRef = useRef(null);
@@ -293,7 +311,7 @@ function App() {
     clearSavedSession();
     persistRef.current = null;
     setGulpers(null);
-    setTasks(DEFAULT_TASKS);
+    setTasks(loadTasks());
     setSession({ jobId: '', enumerator: '', gulperCount: 2, gulperSelections: [], latrineCoords: null, sessionStart: null });
     setIsResuming(false);
     setScreen('setup');
@@ -350,7 +368,7 @@ function App() {
       {screen === 'review' && gulpers && (
         <ReviewScreen
           theme={theme} session={session} tasks={tasks}
-          gulpers={gulpers}
+          gulpers={gulpers} roster={roster}
           onBack={() => setScreen('timer')}
           onNewSession={newSession}
           toggleTheme={toggleTheme}
@@ -1095,23 +1113,59 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
 function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTasks, onPick, onClose, theme }) {
   const { dark, accent, surface, divider, tp, ts } = theme;
   const [expandedTaskId, setExpandedTaskId] = useState(currentTaskId);
-  const [addingTask, setAddingTask] = useState(false);
-  const [newTaskName, setNewTaskName] = useState('');
-  const [newSubtasks, setNewSubtasks] = useState('');
+  const [addMode,        setAddMode]        = useState(null); // null | 'task' | 'subtask'
+  const [newTaskName,    setNewTaskName]    = useState('');
+  const [newSubtaskTask, setNewSubtaskTask] = useState(() => tasks[0]?.id || '');
+  const [newSubtaskName, setNewSubtaskName] = useState('');
+  const [addError,       setAddError]       = useState(null);
+  const [pendingAdd,     setPendingAdd]     = useState(null);
+
+  function closeAddForm() {
+    setAddMode(null); setNewTaskName(''); setNewSubtaskName('');
+    setNewSubtaskTask(tasks[0]?.id || ''); setAddError(null);
+  }
+
+  function tryAddTask() {
+    const label = newTaskName.trim();
+    if (!label) { setAddError('Task name cannot be empty.'); return; }
+    if (tasks.some(t => t.label.toLowerCase() === label.toLowerCase())) {
+      setAddError(`A task named "${label}" already exists.`); return;
+    }
+    setAddError(null);
+    setPendingAdd({ type: 'task', label });
+  }
+
+  function tryAddSubtask() {
+    const label = newSubtaskName.trim();
+    if (!label) { setAddError('Subtask name cannot be empty.'); return; }
+    const taskObj = tasks.find(t => t.id === newSubtaskTask);
+    if (!taskObj) { setAddError('Please select a task.'); return; }
+    if (taskObj.subtasks.some(s => s.toLowerCase() === label.toLowerCase())) {
+      setAddError(`"${label}" already exists under ${taskObj.label}.`); return;
+    }
+    setAddError(null);
+    setPendingAdd({ type: 'subtask', label, taskId: newSubtaskTask, taskLabel: taskObj.label });
+  }
+
+  function confirmAdd() {
+    if (!pendingAdd) return;
+    if (pendingAdd.type === 'task') {
+      const id = 'custom_' + Date.now();
+      setTasks(prev => [...prev, { id, label: pendingAdd.label, subtasks: [] }]);
+      setExpandedTaskId(id);
+    } else {
+      setTasks(prev => prev.map(t =>
+        t.id === pendingAdd.taskId ? { ...t, subtasks: [...t.subtasks, pendingAdd.label] } : t
+      ));
+      setExpandedTaskId(pendingAdd.taskId);
+    }
+    setPendingAdd(null);
+    closeAddForm();
+  }
 
   function handleTaskClick(task) {
     if (task.subtasks.length === 0) { onPick(task.id, null); }
     else { setExpandedTaskId(prev => prev === task.id ? null : task.id); }
-  }
-
-  function submitNewTask() {
-    const label = newTaskName.trim();
-    if (!label) return;
-    const subtasks = newSubtasks.split(',').map(s => s.trim()).filter(Boolean);
-    const id = 'custom_' + Date.now();
-    setTasks(prev => [...prev, { id, label, subtasks }]);
-    setNewTaskName(''); setNewSubtasks(''); setAddingTask(false);
-    setExpandedTaskId(id);
   }
 
   const inputSt = {
@@ -1119,6 +1173,12 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
     background: dark ? '#1A1917' : '#F5F4F0',
     border: `1px solid ${divider}`, borderRadius: 8,
     color: tp, fontSize: 14, fontFamily: 'IBM Plex Sans', outline: 'none',
+  };
+  const selectSt = {
+    ...inputSt,
+    appearance: 'none', WebkitAppearance: 'none', cursor: 'pointer',
+    backgroundImage: `url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238A8880' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+    backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 32,
   };
 
   return (
@@ -1183,33 +1243,102 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
             );
           })}
 
-          {!addingTask ? (
-            <button onClick={() => setAddingTask(true)} style={{
-              width: '100%', padding: '14px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${divider}`, color: ts,
-            }}>
-              <span style={{ fontSize: 20, lineHeight: 1, color: accent }}>+</span>
-              <span style={{ fontSize: 15, fontWeight: 500 }}>Add custom task…</span>
-            </button>
-          ) : (
-            <div style={{ padding: '14px 16px', borderTop: `1px solid ${divider}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, color: tp }}>New task</div>
-              <input autoFocus value={newTaskName} onChange={e => setNewTaskName(e.target.value)} placeholder="Task name (e.g. Equipment repair)" style={inputSt} />
-              <input value={newSubtasks} onChange={e => setNewSubtasks(e.target.value)} placeholder="Subtasks, comma-separated (optional)" style={inputSt} />
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => setAddingTask(false)} style={{ flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`, background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancel</button>
-                <button onClick={submitNewTask} disabled={!newTaskName.trim()} style={{
-                  flex: 1, height: 40, borderRadius: 8, border: 'none',
-                  background: newTaskName.trim() ? accent : (dark ? '#2A2820' : '#E0DED6'),
-                  color: newTaskName.trim() ? '#fff' : ts,
-                  cursor: newTaskName.trim() ? 'pointer' : 'default', fontWeight: 700, fontSize: 14,
-                }}>Add task</button>
+          <div style={{ borderTop: `1px solid ${divider}` }}>
+            {addMode === null && (
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <button onClick={() => setAddMode('task')} style={{
+                  width: '100%', padding: '13px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  borderBottom: `1px solid ${divider}`, color: ts,
+                }}>
+                  <span style={{ fontSize: 18, lineHeight: 1, color: accent }}>+</span>
+                  <span style={{ fontSize: 15, fontWeight: 500 }}>Add new task…</span>
+                </button>
+                <button onClick={() => setAddMode('subtask')} style={{
+                  width: '100%', padding: '13px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 8, color: ts,
+                }}>
+                  <span style={{ fontSize: 18, lineHeight: 1, color: accent }}>+</span>
+                  <span style={{ fontSize: 15, fontWeight: 500 }}>Add new subtask…</span>
+                </button>
               </div>
-            </div>
-          )}
+            )}
+
+            {addMode === 'task' && (
+              <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: tp }}>New task</div>
+                <input autoFocus value={newTaskName}
+                  onChange={e => { setNewTaskName(e.target.value); setAddError(null); }}
+                  onKeyDown={e => { if (e.key === 'Enter') tryAddTask(); }}
+                  placeholder="Task name" style={inputSt} />
+                {addError && <div style={{ fontSize: 12, color: '#CC3333', fontWeight: 500 }}>{addError}</div>}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={closeAddForm} style={{ flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`, background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancel</button>
+                  <button onClick={tryAddTask} disabled={!newTaskName.trim()} style={{
+                    flex: 1, height: 40, borderRadius: 8, border: 'none',
+                    background: newTaskName.trim() ? accent : (dark ? '#2A2820' : '#E0DED6'),
+                    color: newTaskName.trim() ? '#fff' : ts,
+                    cursor: newTaskName.trim() ? 'pointer' : 'default', fontWeight: 700, fontSize: 14,
+                  }}>Add task</button>
+                </div>
+              </div>
+            )}
+
+            {addMode === 'subtask' && (
+              <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: tp }}>New subtask</div>
+                <select value={newSubtaskTask}
+                  onChange={e => { setNewSubtaskTask(e.target.value); setAddError(null); }}
+                  style={selectSt}>
+                  {tasks.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                </select>
+                <input autoFocus value={newSubtaskName}
+                  onChange={e => { setNewSubtaskName(e.target.value); setAddError(null); }}
+                  onKeyDown={e => { if (e.key === 'Enter') tryAddSubtask(); }}
+                  placeholder="Subtask name" style={inputSt} />
+                {addError && <div style={{ fontSize: 12, color: '#CC3333', fontWeight: 500 }}>{addError}</div>}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={closeAddForm} style={{ flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`, background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancel</button>
+                  <button onClick={tryAddSubtask} disabled={!newSubtaskName.trim()} style={{
+                    flex: 1, height: 40, borderRadius: 8, border: 'none',
+                    background: newSubtaskName.trim() ? accent : (dark ? '#2A2820' : '#E0DED6'),
+                    color: newSubtaskName.trim() ? '#fff' : ts,
+                    cursor: newSubtaskName.trim() ? 'pointer' : 'default', fontWeight: 700, fontSize: 14,
+                  }}>Add subtask</button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div style={{ height: 24 }} />
         </div>
       </div>
+
+      {pendingAdd && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 200 }} />
+          <div style={{
+            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+            zIndex: 201, background: surface, borderRadius: 14,
+            width: 'min(90vw, 360px)', padding: '24px 20px 20px',
+            boxShadow: '0 16px 60px rgba(0,0,0,0.4)',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: tp }}>
+              {pendingAdd.type === 'task' ? 'Add new task?' : 'Add new subtask?'}
+            </div>
+            <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
+              {pendingAdd.type === 'task'
+                ? <>You're about to add a new task: <strong style={{ color: tp }}>"{pendingAdd.label}"</strong>. This will be available in all future sessions.</>
+                : <>You're about to add a new subtask: <strong style={{ color: tp }}>"{pendingAdd.label}"</strong> under <strong style={{ color: tp }}>"{pendingAdd.taskLabel}"</strong>. This will be available in all future sessions.</>
+              }
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setPendingAdd(null)} style={{ flex: 1, height: 44, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Cancel</button>
+              <button onClick={confirmAdd} style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 14, color: '#fff' }}>Confirm</button>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -1217,7 +1346,7 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
 // ═══════════════════════════════════════════════════════════════════════
 // SCREEN 3 — Review & Export
 // ═══════════════════════════════════════════════════════════════════════
-function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, toggleTheme }) {
+function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSession, toggleTheme }) {
   const { dark, accent, surface, divider, tp, ts } = theme;
 
   const initEntries = () => {
@@ -1261,34 +1390,37 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
     });
 
     const header = [
-      'job_id', 'enumerator', 'date', 'start_time', 'end_time',
+      'job_id', 'enumerator', 'date', 'session_start_time', 'session_end_time',
       'latrine_gps_lat', 'latrine_gps_lng', 'session_notes', 'num_gulpers',
-      'entry_number', 'gulper_id', 'gulper_name', 'task', 'subtask',
-      'entry_start_time', 'entry_end_time', 'duration_seconds', 'entry_note',
+      'entry_number', 'gulper_id', 'gulper_first_name', 'gulper_last_name', 'task', 'subtask',
+      'entry_start_time', 'entry_end_time', 'duration_seconds',
     ];
 
     const data = sortedEntries.map((e, i) => {
-      const endTs   = e.ts instanceof Date ? e.ts : new Date(e.ts);
-      const startTs = new Date(endTs.getTime() - (e.ms || 0));
+      const endTs      = e.ts instanceof Date ? e.ts : new Date(e.ts);
+      const startTs    = new Date(endTs.getTime() - (e.ms || 0));
+      const taskObj    = tasks.find(t => t.label === e.task);
+      const subtaskVal = (taskObj && taskObj.subtasks.length > 0) ? (e.subtask || '') : '';
+      const rEntry     = (roster || []).find(r => r.id === e.gulper_id);
       return [
         session.jobId        || '',
         session.enumerator   || '',
         fmtLocalDate(session.sessionStart),
         fmtLocalTime(session.sessionStart),
         fmtLocalTime(now),
-        session.latrineCoords ? session.latrineCoords.lat : '',
-        session.latrineCoords ? session.latrineCoords.lng : '',
+        session.latrineCoords ? parseFloat(session.latrineCoords.lat.toFixed(5)) : '',
+        session.latrineCoords ? parseFloat(session.latrineCoords.lng.toFixed(5)) : '',
         globalNote           || '',
         gulperSelections.length,
         i + 1,
         rosterIdToInt(e.gulper_id),
-        e.gulper             || '',
+        rEntry?.first_name   || '',
+        rEntry?.last_name    || '',
         e.task               || '',
-        e.subtask            || '',
+        subtaskVal,
         fmtLocalTime(startTs),
         fmtLocalTime(endTs),
         ((e.ms || 0) / 1000).toFixed(1),
-        e.note               || '',
       ];
     });
 
@@ -1303,12 +1435,18 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
 
   function exportCSV() {
     const { header, data } = buildTidyRows();
-    const escape = c => {
-      const s = (c === null || c === undefined) ? '' : String(c);
-      return (s.includes(',') || s.includes('"') || s.includes('\n'))
-        ? `"${s.replace(/"/g, '""')}"` : s;
+    const escapeHeader = c => {
+      const s = String(c);
+      return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const csv = [header, ...data].map(r => r.map(escape).join(',')).join('\n');
+    const escapeData = c => {
+      const s = (c === null || c === undefined || c === '') ? 'NA' : String(c);
+      return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [
+      header.map(escapeHeader).join(','),
+      ...data.map(r => r.map(escapeData).join(',')),
+    ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
