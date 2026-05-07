@@ -1252,101 +1252,77 @@ function ReviewScreen({ theme, session, tasks, gulpers, onBack, onNewSession, to
 
   const gulperSelections = session.gulperSelections || [];
 
-  function buildSessionInfoRows() {
-    const rows = [];
-    rows.push(['SESSION INFORMATION', '']);
-    rows.push(['Job ID',         session.jobId || '']);
-    rows.push(['Enumerator',     session.enumerator || '']);
-    rows.push(['Session Start',  fmtLocalDate(session.sessionStart), fmtLocalTime(session.sessionStart)]);
-    rows.push(['Session End',    fmtLocalDate(new Date()), fmtLocalTime(new Date())]);
-    rows.push(['Pit Latrine GPS', fmtCoords(session.latrineCoords)]);
-    gulperSelections.forEach((g, i) => rows.push([`Gulper ${i+1}`, g.name, g.id || '']));
-    rows.push(['Session Notes',  globalNote || '']);
-    rows.push([]);
-    rows.push(['TASK SUMMARY', '', '', '']);
-    rows.push(['Gulper', 'Task', 'Subtask', 'Total Time (s)']);
-    const summary = {};
-    entries.forEach(e => {
-      const key = `${e.gulper||''}||${e.task||''}||${e.subtask||''}`;
-      summary[key] = (summary[key] || 0) + (e.ms || 0);
+  function buildTidyRows() {
+    const now = new Date();
+    const sortedEntries = [...entries].sort((a, b) => {
+      const aStart = new Date(a.ts).getTime() - (a.ms || 0);
+      const bStart = new Date(b.ts).getTime() - (b.ms || 0);
+      return aStart - bStart;
     });
-    Object.entries(summary).forEach(([key, ms]) => {
-      const [gulper, task, subtask] = key.split('||');
-      rows.push([gulper, task, subtask, (ms/1000).toFixed(1)]);
-    });
-    return rows;
-  }
 
-  function buildTimeLogRows() {
-    const header = ['Gulper ID', 'Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
-    const data = entries.map(e => {
-      const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
+    const header = [
+      'job_id', 'enumerator', 'date', 'start_time', 'end_time',
+      'latrine_gps_lat', 'latrine_gps_lng', 'session_notes', 'num_gulpers',
+      'entry_number', 'gulper_id', 'gulper_name', 'task', 'subtask',
+      'entry_start_time', 'entry_end_time', 'duration_seconds', 'entry_note',
+    ];
+
+    const data = sortedEntries.map((e, i) => {
+      const endTs   = e.ts instanceof Date ? e.ts : new Date(e.ts);
+      const startTs = new Date(endTs.getTime() - (e.ms || 0));
       return [
+        session.jobId        || '',
+        session.enumerator   || '',
+        fmtLocalDate(session.sessionStart),
+        fmtLocalTime(session.sessionStart),
+        fmtLocalTime(now),
+        session.latrineCoords ? session.latrineCoords.lat : '',
+        session.latrineCoords ? session.latrineCoords.lng : '',
+        globalNote           || '',
+        gulperSelections.length,
+        i + 1,
         rosterIdToInt(e.gulper_id),
-        e.gulper   || '',
-        e.task     || '',
-        e.subtask  || '',
-        ((e.ms||0)/1000).toFixed(1),
-        fmtLocalDate(dt), fmtLocalTime(dt),
-        e.note || '',
+        e.gulper             || '',
+        e.task               || '',
+        e.subtask            || '',
+        fmtLocalTime(startTs),
+        fmtLocalTime(endTs),
+        ((e.ms || 0) / 1000).toFixed(1),
+        e.note               || '',
       ];
     });
-    return [header, ...data];
+
+    return { header, data };
+  }
+
+  function exportFilename(ext) {
+    const rawId  = (session.jobId || 'session').replace(/^job_/, '');
+    const safeId = rawId.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return `${safeId}.${ext}`;
   }
 
   function exportCSV() {
-    const infoRows = buildSessionInfoRows();
-    const logRows  = buildTimeLogRows();
-    const all = [...infoRows, [], ['--- TIME LOG ---'], ...logRows];
-    const csv = all.map(r => r.map(c => `"${(c||'').toString().replace(/"/g,'""')}"`).join(',')).join('\n');
+    const { header, data } = buildTidyRows();
+    const escape = c => {
+      const s = (c === null || c === undefined) ? '' : String(c);
+      return (s.includes(',') || s.includes('"') || s.includes('\n'))
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [header, ...data].map(r => r.map(escape).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `gulper_${session.jobId}_${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = exportFilename('csv');
     a.click();
     setHasExported(true);
   }
 
   function exportXLSX() {
     if (typeof XLSX === 'undefined') { showToast('Excel library not loaded — check connection'); return; }
-
-    const infoData = [
-      ['Field', 'Value'],
-      ['Job ID',          session.jobId || ''],
-      ['Enumerator',      session.enumerator || ''],
-      ['Date',            fmtLocalDate(session.sessionStart)],
-      ['Session Start',   fmtLocalTime(session.sessionStart)],
-      ['Session End',     fmtLocalTime(new Date())],
-      ['Pit Latrine GPS', fmtCoords(session.latrineCoords)],
-      ...gulperSelections.map((g, i) => [`Gulper ${i+1}`, g.name]),
-      ['Session Notes',   globalNote || ''],
-    ];
-
-    const logHeader = ['Gulper ID', 'Gulper', 'Task', 'Subtask', 'Elapsed (s)', 'Date', 'Time', 'Note'];
-    const sortedEntries = [...entries].sort((a, b) => {
-      const aStart = new Date(a.ts).getTime() - (a.ms || 0);
-      const bStart = new Date(b.ts).getTime() - (b.ms || 0);
-      return aStart - bStart;
-    });
-    const logData = sortedEntries.map(e => {
-      const dt = e.ts instanceof Date ? e.ts : new Date(e.ts);
-      return [
-        rosterIdToInt(e.gulper_id),
-        e.gulper    || '',
-        e.task      || '',
-        e.subtask   || '',
-        ((e.ms || 0) / 1000).toFixed(1),
-        fmtLocalDate(dt), fmtLocalTime(dt),
-        e.note || '',
-      ];
-    });
-
+    const { header, data } = buildTidyRows();
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(infoData), 'Session Info');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([logHeader, ...logData]), 'Time Log');
-
-    const safeId = (session.jobId || 'session').replace(/[^a-zA-Z0-9._-]/g, '_');
-    XLSX.writeFile(wb, `${safeId}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([header, ...data]));
+    XLSX.writeFile(wb, exportFilename('xlsx'));
     setHasExported(true);
   }
 
