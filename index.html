@@ -164,25 +164,32 @@ function clearSavedSession() {
 }
 
 // ── Default task hierarchy ────────────────────────────────────────────
-const TASK_HIERARCHY_KEY = 'task_hierarchy';
+const TASK_HIERARCHY_KEY         = 'task_hierarchy';
+const TASK_HIERARCHY_VERSION_KEY = 'task_hierarchy_version';
+const TASK_HIERARCHY_VERSION     = 'v2';
 
 const DEFAULT_TASKS = [
-  { id: 'setup',      label: 'Setup',      subtasks: ['Inspect the pit latrine', 'Client engagement', 'Dig trench', 'Put hole in pit liner'] },
-  { id: 'extraction', label: 'Extraction', subtasks: ['Removing sludge', 'Pulling out trash'] },
-  { id: 'fluidizing', label: 'Fluidizing', subtasks: ['Adding water'] },
-  { id: 'cleaning',   label: 'Cleaning',   subtasks: ['Washing slab', 'Tidying area'] },
-  { id: 'completion', label: 'Completion', subtasks: ['Repair pit liner', 'Fill trench', 'Containerization', 'Clean equipment', 'Client engagement', 'Container transport'] },
-  { id: 'travel',     label: 'Travel',     subtasks: ['Travel to disposal site'] },
-  { id: 'disposal',   label: 'Disposal',   subtasks: [] },
-  { id: 'rest',       label: 'Rest',       subtasks: [] },
+  { id: 'communication',  label: 'Communication',  subtasks: ['With client(s)', 'With other gulper(s)'] },
+  { id: 'fluidizing',     label: 'Fluidizing',     subtasks: ['Fetching water', 'Adding water', 'Mixing water'] },
+  { id: 'equipment',      label: 'Equipment',      subtasks: ['Maneuvering', 'Repairing', 'Cleaning'] },
+  { id: 'earthworks',     label: 'Earthworks',     subtasks: ['Dig trench', 'Put hole in pit liner', 'Repair pit liner', 'Fill trench'] },
+  { id: 'superstructure', label: 'Superstructure', subtasks: ['Inspection', 'Modification', 'Repair', 'Cleaning'] },
+  { id: 'extraction',     label: 'Extraction',     subtasks: ['Removing sludge', 'Pulling out trash'] },
+  { id: 'travel',         label: 'Travel',         subtasks: ['Travel to disposal site', 'On errand'] },
+  { id: 'disposal',       label: 'Disposal',       subtasks: [] },
+  { id: 'rest',           label: 'Rest',           subtasks: [] },
 ];
 
 function loadTasks() {
   try {
-    const raw = localStorage.getItem(TASK_HIERARCHY_KEY);
-    if (raw) return JSON.parse(raw);
+    const ver = localStorage.getItem(TASK_HIERARCHY_VERSION_KEY);
+    if (ver === TASK_HIERARCHY_VERSION) {
+      const raw = localStorage.getItem(TASK_HIERARCHY_KEY);
+      if (raw) return JSON.parse(raw);
+    }
   } catch(e) {}
   saveTasks(DEFAULT_TASKS);
+  try { localStorage.setItem(TASK_HIERARCHY_VERSION_KEY, TASK_HIERARCHY_VERSION); } catch(e) {}
   return DEFAULT_TASKS;
 }
 function saveTasks(t) {
@@ -265,7 +272,7 @@ function App() {
   const [session,    setSession]    = useState(_SAVED?.session     || {
     jobId: '', enumerator_first_name: '', enumerator_last_name: '', enumerator_id: null,
     gulperCount: 2, gulperSelections: [],
-    latrineCoords: null, sessionStart: null,
+    latrineCoords: null, sessionStart: null, session_notes: '',
   });
   const [tasks,   setTasks]   = useState(() => loadTasks());
   useEffect(() => { saveTasks(tasks); }, [tasks]);
@@ -339,7 +346,7 @@ function App() {
     persistRef.current = null;
     setGulpers(null);
     setTasks(loadTasks());
-    setSession({ jobId: '', enumerator_first_name: '', enumerator_last_name: '', enumerator_id: null, gulperCount: 2, gulperSelections: [], latrineCoords: null, sessionStart: null });
+    setSession({ jobId: '', enumerator_first_name: '', enumerator_last_name: '', enumerator_id: null, gulperCount: 2, gulperSelections: [], latrineCoords: null, sessionStart: null, session_notes: '' });
     setIsResuming(false);
     setScreen('setup');
   }
@@ -888,12 +895,448 @@ function RosterManager({ roster, setRoster, theme, onClose }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// TASK MANAGER
+// ═══════════════════════════════════════════════════════════════════════
+function TaskManager({ tasks, setTasks, setGulpers, onClose, theme }) {
+  const { dark, accent, surface, surface2, divider, tp, ts } = theme;
+
+  const [expandedIds,   setExpandedIds]   = useState(() => new Set(tasks.map(t => t.id)));
+  const [editMode,      setEditMode]      = useState(null); // {type:'task'|'subtask', taskId, subIdx?}
+  const [editLabel,     setEditLabel]     = useState('');
+  const [editError,     setEditError]     = useState(null);
+  const [addTaskOpen,   setAddTaskOpen]   = useState(false);
+  const [newTaskLabel,  setNewTaskLabel]  = useState('');
+  const [addTaskError,  setAddTaskError]  = useState(null);
+  const [addingSubFor,  setAddingSubFor]  = useState(null); // taskId
+  const [newSubLabel,   setNewSubLabel]   = useState('');
+  const [addSubError,   setAddSubError]   = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null); // {type, taskId, subIdx?}
+  const [movePicker,    setMovePicker]    = useState(null); // {taskId, subIdx}
+  const [pendingImport, setPendingImport] = useState(null);
+  const importRef = useRef(null);
+
+  function toggleExpand(id) {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  // ── Rename ────────────────────────────────────────────────────────────
+  function startEditTask(t) {
+    setEditMode({ type: 'task', taskId: t.id });
+    setEditLabel(t.label); setEditError(null);
+    setAddTaskOpen(false); setAddingSubFor(null);
+  }
+  function startEditSubtask(taskId, subIdx, label) {
+    setEditMode({ type: 'subtask', taskId, subIdx });
+    setEditLabel(label); setEditError(null);
+    setAddTaskOpen(false); setAddingSubFor(null);
+  }
+  function saveEdit() {
+    const label = editLabel.trim();
+    if (!label) { setEditError('Name cannot be empty.'); return; }
+    if (editMode.type === 'task') {
+      const oldTask = tasks.find(t => t.id === editMode.taskId);
+      if (!oldTask) return;
+      if (tasks.some(t => t.id !== editMode.taskId && t.label.toLowerCase() === label.toLowerCase())) {
+        setEditError(`"${label}" already exists.`); return;
+      }
+      const oldLabel = oldTask.label;
+      setTasks(prev => prev.map(t => t.id === editMode.taskId ? { ...t, label } : t));
+      setGulpers(gs => gs.map(g => ({
+        ...g,
+        log: g.log.map(e => e.task === oldLabel ? { ...e, task: label } : e),
+      })));
+    } else {
+      const taskObj = tasks.find(t => t.id === editMode.taskId);
+      if (!taskObj) return;
+      const oldSubLabel = taskObj.subtasks[editMode.subIdx];
+      if (taskObj.subtasks.some((s, i) => i !== editMode.subIdx && s.toLowerCase() === label.toLowerCase())) {
+        setEditError(`"${label}" already exists under ${taskObj.label}.`); return;
+      }
+      setTasks(prev => prev.map(t => t.id === editMode.taskId
+        ? { ...t, subtasks: t.subtasks.map((s, i) => i === editMode.subIdx ? label : s) }
+        : t
+      ));
+      const taskLabel = taskObj.label;
+      setGulpers(gs => gs.map(g => ({
+        ...g,
+        log: g.log.map(e => e.task === taskLabel && e.subtask === oldSubLabel ? { ...e, subtask: label } : e),
+      })));
+    }
+    setEditMode(null); setEditLabel(''); setEditError(null);
+  }
+  function cancelEdit() { setEditMode(null); setEditLabel(''); setEditError(null); }
+
+  // ── Add task ──────────────────────────────────────────────────────────
+  function addTask() {
+    const label = newTaskLabel.trim();
+    if (!label) { setAddTaskError('Name cannot be empty.'); return; }
+    if (tasks.some(t => t.label.toLowerCase() === label.toLowerCase())) {
+      setAddTaskError(`"${label}" already exists.`); return;
+    }
+    const id = 'custom_' + Date.now();
+    setTasks(prev => [...prev, { id, label, subtasks: [] }]);
+    setExpandedIds(prev => new Set([...prev, id]));
+    setNewTaskLabel(''); setAddTaskOpen(false); setAddTaskError(null);
+  }
+
+  // ── Add subtask ───────────────────────────────────────────────────────
+  function addSubtask(taskId) {
+    const label = newSubLabel.trim();
+    if (!label) { setAddSubError('Name cannot be empty.'); return; }
+    const taskObj = tasks.find(t => t.id === taskId);
+    if (!taskObj) return;
+    if (taskObj.subtasks.some(s => s.toLowerCase() === label.toLowerCase())) {
+      setAddSubError(`"${label}" already exists under ${taskObj.label}.`); return;
+    }
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, subtasks: [...t.subtasks, label] } : t));
+    setNewSubLabel(''); setAddingSubFor(null); setAddSubError(null);
+  }
+
+  // ── Delete ────────────────────────────────────────────────────────────
+  function doDelete() {
+    if (!confirmDelete) return;
+    if (confirmDelete.type === 'task') {
+      setTasks(prev => prev.filter(t => t.id !== confirmDelete.taskId));
+    } else {
+      setTasks(prev => prev.map(t => t.id === confirmDelete.taskId
+        ? { ...t, subtasks: t.subtasks.filter((_, i) => i !== confirmDelete.subIdx) }
+        : t
+      ));
+    }
+    setConfirmDelete(null);
+  }
+
+  // ── Reorder ───────────────────────────────────────────────────────────
+  function moveTaskUp(idx) {
+    if (idx === 0) return;
+    setTasks(prev => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; return a; });
+  }
+  function moveTaskDown(idx) {
+    setTasks(prev => {
+      if (idx >= prev.length - 1) return prev;
+      const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; return a;
+    });
+  }
+  function moveSubUp(taskId, si) {
+    if (si === 0) return;
+    setTasks(prev => prev.map(t => {
+      if (t.id !== taskId) return t;
+      const s = [...t.subtasks]; [s[si-1], s[si]] = [s[si], s[si-1]]; return { ...t, subtasks: s };
+    }));
+  }
+  function moveSubDown(taskId, si) {
+    setTasks(prev => prev.map(t => {
+      if (t.id !== taskId) return t;
+      if (si >= t.subtasks.length - 1) return t;
+      const s = [...t.subtasks]; [s[si], s[si+1]] = [s[si+1], s[si]]; return { ...t, subtasks: s };
+    }));
+  }
+
+  // ── Move subtask ──────────────────────────────────────────────────────
+  function moveSubtaskTo(toTaskId) {
+    if (!movePicker) return;
+    const { taskId: fromId, subIdx } = movePicker;
+    const fromTask = tasks.find(t => t.id === fromId);
+    if (!fromTask) { setMovePicker(null); return; }
+    const label = fromTask.subtasks[subIdx];
+    setTasks(prev => prev.map(t => {
+      if (t.id === fromId) return { ...t, subtasks: t.subtasks.filter((_, i) => i !== subIdx) };
+      if (t.id === toTaskId) return { ...t, subtasks: [...t.subtasks, label] };
+      return t;
+    }));
+    setMovePicker(null);
+  }
+
+  // ── Export / Import ───────────────────────────────────────────────────
+  function exportJSON() {
+    const blob = new Blob([JSON.stringify(tasks, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'task_hierarchy.json'; a.click();
+  }
+  function handleFileImport(e) {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (!Array.isArray(data)) { alert('Invalid file — expected a JSON array'); return; }
+        setPendingImport(data);
+      } catch(err) { alert('Could not parse file as JSON'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  // ── Shared styles ─────────────────────────────────────────────────────
+  const iconBtn = {
+    width: 28, height: 28, borderRadius: 6, border: `1px solid ${divider}`,
+    background: 'transparent', cursor: 'pointer', fontSize: 13,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    color: ts, flexShrink: 0,
+  };
+  const smBtn = (hi) => ({
+    padding: '5px 10px', borderRadius: 7, border: `1px solid ${hi ? accent : divider}`,
+    background: hi ? accent : 'transparent', color: hi ? '#fff' : ts,
+    cursor: 'pointer', fontSize: 12, fontWeight: hi ? 700 : 500, flexShrink: 0,
+  });
+  const delBtn = {
+    padding: '5px 10px', borderRadius: 7, fontSize: 12, fontWeight: 500, flexShrink: 0,
+    border: `1px solid ${dark ? '#4A1F1F' : '#F0CECE'}`,
+    background: dark ? 'rgba(204,51,51,0.08)' : 'rgba(204,51,51,0.05)', color: '#CC3333', cursor: 'pointer',
+  };
+  const fieldSt = {
+    flex: 1, padding: '7px 10px',
+    background: surface2, border: `1px solid ${divider}`,
+    borderRadius: 7, color: tp, fontSize: 14, outline: 'none',
+  };
+
+  return (
+    <>
+      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 500 }} />
+      <div style={{ position: 'fixed', inset: 0, zIndex: 501, display: 'flex', flexDirection: 'column', background: surface }}>
+
+        {/* Header */}
+        <div style={{ padding: '16px 16px 12px', borderBottom: `1px solid ${divider}`, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: ts, fontSize: 20, lineHeight: 1, padding: 0 }}>←</button>
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 17 }}>Manage Tasks</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={exportJSON} style={smBtn(false)}>Export JSON</button>
+            <button onClick={() => importRef.current?.click()} style={smBtn(false)}>Import JSON</button>
+            <input ref={importRef} type="file" accept=".json" onChange={handleFileImport} style={{ display: 'none' }} />
+          </div>
+        </div>
+
+        {/* Add task — sticky below header */}
+        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${divider}`, background: dark ? '#1A1917' : '#F5F4F0', flexShrink: 0 }}>
+          {!addTaskOpen ? (
+            <button onClick={() => { setAddTaskOpen(true); setEditMode(null); setAddingSubFor(null); }} style={{
+              width: '100%', height: 46, borderRadius: 10,
+              border: `1.5px dashed ${divider}`, background: 'transparent',
+              color: ts, cursor: 'pointer', fontSize: 15, fontWeight: 600,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}>
+              <span style={{ fontSize: 20, color: accent, lineHeight: 1 }}>+</span> Add task
+            </button>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <input autoFocus value={newTaskLabel}
+                onChange={e => { setNewTaskLabel(e.target.value); setAddTaskError(null); }}
+                onKeyDown={e => { if (e.key === 'Enter') addTask(); if (e.key === 'Escape') { setAddTaskOpen(false); setNewTaskLabel(''); setAddTaskError(null); } }}
+                placeholder="New task name" style={{ ...fieldSt, flex: 'unset', width: '100%' }} />
+              {addTaskError && <div style={{ fontSize: 12, color: '#CC3333' }}>{addTaskError}</div>}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={addTask} disabled={!newTaskLabel.trim()} style={{ ...smBtn(!!newTaskLabel.trim()), flex: 1, height: 40 }}>Add</button>
+                <button onClick={() => { setAddTaskOpen(false); setNewTaskLabel(''); setAddTaskError(null); }} style={{ ...smBtn(false), flex: 1, height: 40 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Task list — scrollable */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {tasks.map((task, taskIdx) => {
+            const isExpanded = expandedIds.has(task.id);
+            const isEditingTask = editMode?.type === 'task' && editMode.taskId === task.id;
+            return (
+              <div key={task.id} style={{ borderBottom: `1px solid ${divider}` }}>
+                {/* Task row */}
+                <div style={{ display: 'flex', alignItems: 'center', padding: '10px 16px', gap: 6, minHeight: 52 }}>
+                  <button onClick={() => toggleExpand(task.id)} style={{
+                    ...iconBtn, border: 'none', fontSize: 10,
+                    transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s',
+                  }}>▶</button>
+                  {isEditingTask ? (
+                    <>
+                      <input autoFocus value={editLabel}
+                        onChange={e => { setEditLabel(e.target.value); setEditError(null); }}
+                        onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                        style={{ ...fieldSt, fontSize: 15, fontWeight: 600 }} />
+                      <button onClick={saveEdit} style={smBtn(true)}>Save</button>
+                      <button onClick={cancelEdit} style={smBtn(false)}>✕</button>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ flex: 1, fontSize: 15, fontWeight: 600, color: tp }}>{task.label}</span>
+                      <span style={{ fontSize: 10, color: ts, flexShrink: 0, whiteSpace: 'nowrap' }}>
+                        {task.subtasks.length > 0 ? `${task.subtasks.length} sub` : 'parent'}
+                      </span>
+                      <button onClick={() => moveTaskUp(taskIdx)} disabled={taskIdx === 0} style={{ ...iconBtn, opacity: taskIdx === 0 ? 0.3 : 1 }}>↑</button>
+                      <button onClick={() => moveTaskDown(taskIdx)} disabled={taskIdx === tasks.length - 1} style={{ ...iconBtn, opacity: taskIdx === tasks.length - 1 ? 0.3 : 1 }}>↓</button>
+                      <button onClick={() => startEditTask(task)} style={smBtn(false)}>Rename</button>
+                      <button onClick={() => setConfirmDelete({ type: 'task', taskId: task.id })} style={delBtn}>Remove</button>
+                    </>
+                  )}
+                </div>
+                {isEditingTask && editError && (
+                  <div style={{ padding: '0 16px 8px 54px', fontSize: 12, color: '#CC3333' }}>{editError}</div>
+                )}
+
+                {/* Subtasks */}
+                {isExpanded && (
+                  <div style={{ background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)' }}>
+                    {task.subtasks.map((sub, si) => {
+                      const isEditingSub = editMode?.type === 'subtask' && editMode.taskId === task.id && editMode.subIdx === si;
+                      return (
+                        <div key={si} style={{ borderTop: `1px solid ${divider}` }}>
+                          <div style={{ display: 'flex', alignItems: 'center', padding: '7px 16px 7px 40px', gap: 6, minHeight: 42 }}>
+                            <div style={{ width: 5, height: 5, borderRadius: '50%', background: dark ? '#555' : '#C0BDB4', flexShrink: 0 }} />
+                            {isEditingSub ? (
+                              <>
+                                <input autoFocus value={editLabel}
+                                  onChange={e => { setEditLabel(e.target.value); setEditError(null); }}
+                                  onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                                  style={fieldSt} />
+                                <button onClick={saveEdit} style={smBtn(true)}>Save</button>
+                                <button onClick={cancelEdit} style={smBtn(false)}>✕</button>
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ flex: 1, fontSize: 14, color: tp }}>{sub}</span>
+                                <button onClick={() => moveSubUp(task.id, si)} disabled={si === 0} style={{ ...iconBtn, opacity: si === 0 ? 0.3 : 1 }}>↑</button>
+                                <button onClick={() => moveSubDown(task.id, si)} disabled={si === task.subtasks.length - 1} style={{ ...iconBtn, opacity: si === task.subtasks.length - 1 ? 0.3 : 1 }}>↓</button>
+                                <button onClick={() => setMovePicker({ taskId: task.id, subIdx: si })} style={smBtn(false)}>Move</button>
+                                <button onClick={() => startEditSubtask(task.id, si, sub)} style={smBtn(false)}>Rename</button>
+                                <button onClick={() => setConfirmDelete({ type: 'subtask', taskId: task.id, subIdx: si })} style={delBtn}>Remove</button>
+                              </>
+                            )}
+                          </div>
+                          {isEditingSub && editError && (
+                            <div style={{ padding: '0 16px 6px 56px', fontSize: 12, color: '#CC3333' }}>{editError}</div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* Add subtask inline */}
+                    {addingSubFor === task.id ? (
+                      <div style={{ padding: '8px 16px 8px 40px', borderTop: `1px solid ${divider}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <input autoFocus value={newSubLabel}
+                            onChange={e => { setNewSubLabel(e.target.value); setAddSubError(null); }}
+                            onKeyDown={e => { if (e.key === 'Enter') addSubtask(task.id); if (e.key === 'Escape') { setAddingSubFor(null); setNewSubLabel(''); setAddSubError(null); } }}
+                            placeholder="Subtask name" style={fieldSt} />
+                          <button onClick={() => addSubtask(task.id)} disabled={!newSubLabel.trim()} style={smBtn(!!newSubLabel.trim())}>Add</button>
+                          <button onClick={() => { setAddingSubFor(null); setNewSubLabel(''); setAddSubError(null); }} style={smBtn(false)}>✕</button>
+                        </div>
+                        {addSubError && <div style={{ fontSize: 12, color: '#CC3333' }}>{addSubError}</div>}
+                      </div>
+                    ) : (
+                      <button onClick={() => { setAddingSubFor(task.id); setNewSubLabel(''); setAddSubError(null); setEditMode(null); setAddTaskOpen(false); }} style={{
+                        width: '100%', padding: '8px 16px 8px 40px', background: 'transparent',
+                        border: 'none', borderTop: `1px solid ${divider}`, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 8, color: ts,
+                      }}>
+                        <span style={{ fontSize: 16, color: accent, lineHeight: 1 }}>+</span>
+                        <span style={{ fontSize: 13 }}>Add subtask…</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div style={{ height: 40 }} />
+        </div>
+
+        {/* Delete confirmation */}
+        {confirmDelete && (
+          <>
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 600 }} />
+            <div style={{
+              position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              zIndex: 601, background: surface, borderRadius: 14,
+              width: 'min(90vw, 360px)', padding: '24px 20px 20px',
+              boxShadow: '0 16px 60px rgba(0,0,0,0.35)',
+            }}>
+              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: tp }}>
+                {confirmDelete.type === 'task' ? 'Remove task?' : 'Remove subtask?'}
+              </div>
+              <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
+                Removing this {confirmDelete.type} will hide it from future task pickers. Any past CSV/xlsx files you've already exported are unaffected.
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => setConfirmDelete(null)} style={{ flex: 1, height: 44, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Cancel</button>
+                <button onClick={doDelete} style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: '#CC3333', cursor: 'pointer', fontWeight: 700, fontSize: 14, color: '#fff' }}>Remove</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Move subtask picker */}
+        {movePicker && (() => {
+          const fromTask = tasks.find(t => t.id === movePicker.taskId);
+          return (
+            <>
+              <div onClick={() => setMovePicker(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 600 }} />
+              <div style={{
+                position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+                zIndex: 601, background: surface, borderRadius: 14,
+                width: 'min(90vw, 360px)', padding: '20px',
+                boxShadow: '0 16px 60px rgba(0,0,0,0.35)',
+                maxHeight: '70vh', display: 'flex', flexDirection: 'column', gap: 12,
+              }}>
+                <div style={{ fontWeight: 700, fontSize: 16, color: tp }}>Move subtask to…</div>
+                <div style={{ fontSize: 13, color: ts }}>
+                  "{fromTask?.subtasks[movePicker.subIdx]}" from <strong style={{ color: tp }}>{fromTask?.label}</strong>
+                </div>
+                <div style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {tasks.filter(t => t.id !== movePicker.taskId).map(t => (
+                    <button key={t.id} onClick={() => moveSubtaskTo(t.id)} style={{
+                      width: '100%', padding: '12px 14px', borderRadius: 8,
+                      border: `1px solid ${divider}`, background: 'transparent',
+                      cursor: 'pointer', fontWeight: 500, fontSize: 15, color: tp, textAlign: 'left',
+                    }}>{t.label}</button>
+                  ))}
+                </div>
+                <button onClick={() => setMovePicker(null)} style={{
+                  height: 44, borderRadius: 10, border: `1px solid ${divider}`,
+                  background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: ts,
+                }}>Cancel</button>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* Import confirmation */}
+        {pendingImport && (
+          <>
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 600 }} />
+            <div style={{
+              position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              zIndex: 601, background: surface, borderRadius: 14,
+              width: 'min(90vw, 360px)', padding: '24px 20px 20px',
+              boxShadow: '0 16px 60px rgba(0,0,0,0.35)',
+            }}>
+              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: tp }}>Replace task hierarchy?</div>
+              <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
+                This will replace the current {tasks.length} tasks with {pendingImport.length} tasks from the file. This cannot be undone.
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => setPendingImport(null)} style={{ flex: 1, height: 44, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Cancel</button>
+                <button onClick={() => { setTasks(pendingImport); setExpandedIds(new Set(pendingImport.map(t => t.id))); setPendingImport(null); }} style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 14, color: '#fff' }}>Replace</button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // SCREEN 2 — Timer
 // ═══════════════════════════════════════════════════════════════════════
 function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, setGulpers, onEnd, onBackToSetup, toggleTheme }) {
   const { divider } = theme;
   const [tick, setTick] = useState(0);
   const [picker, setPicker] = useState({ gulperIdx: null, open: false });
+  const [notesOpen,    setNotesOpen]    = useState(false);
+  const [managerOpen,  setManagerOpen]  = useState(false);
+  const [pickerSaved,  setPickerSaved]  = useState(null);
   const count = gulpers.length;
   const is4 = count === 4;
 
@@ -945,6 +1388,7 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
         session={session} setSession={setSession}
         onEnd={handleEnd} onBackToSetup={handleBackToSetup}
         toggleTheme={toggleTheme} theme={theme}
+        onOpenNotes={() => setNotesOpen(true)}
       />
 
       <div style={{
@@ -964,6 +1408,7 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
               setGulpers(gs => gs.map((g, i) => {
                 if (i !== idx) return g;
                 const task = tasks.find(t => t.id === g.taskId);
+                if (!task) return g; // stale/unknown task — skip log entry
                 const elapsed = liveElapsed(g);
                 const subtaskLabel = task.subtasks.length > 0 ? task.subtasks[g.subtaskIdx] : task.label;
                 const entry = { gulper_id: g.id || null, gulper: g.name, task: task.label, subtask: subtaskLabel, ms: elapsed, ts: new Date() };
@@ -982,9 +1427,39 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
           gulperName={gulpers[picker.gulperIdx]?.name}
           currentTaskId={gulpers[picker.gulperIdx]?.taskId}
           currentSubtaskIdx={gulpers[picker.gulperIdx]?.subtaskIdx}
-          tasks={tasks} setTasks={setTasks}
+          tasks={tasks}
           onPick={(tid, sidx) => pickTask(picker.gulperIdx, tid, sidx)}
           onClose={() => setPicker({ gulperIdx: null, open: false })}
+          onManageTasks={() => {
+            setPickerSaved(picker);
+            setPicker({ gulperIdx: null, open: false });
+            setManagerOpen(true);
+          }}
+          theme={theme}
+        />
+      )}
+
+      {notesOpen && (
+        <NotesEditor
+          initialText={session.session_notes || ''}
+          onSave={text => {
+            setSession(s => ({ ...s, session_notes: text }));
+            setNotesOpen(false);
+          }}
+          onCancel={() => setNotesOpen(false)}
+          theme={theme}
+        />
+      )}
+
+      {managerOpen && (
+        <TaskManager
+          tasks={tasks} setTasks={setTasks}
+          setGulpers={setGulpers}
+          onClose={() => {
+            setManagerOpen(false);
+            if (pickerSaved?.open) setPicker(pickerSaved);
+            setPickerSaved(null);
+          }}
           theme={theme}
         />
       )}
@@ -992,7 +1467,7 @@ function TimerScreen({ theme, session, setSession, tasks, setTasks, gulpers, set
   );
 }
 
-function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme }) {
+function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme, onOpenNotes }) {
   const { dark, surface, divider, tp, ts, accent } = theme;
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsToast,   setGpsToast]   = useState(null);
@@ -1060,6 +1535,15 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
           display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17,
         }}>{dark ? '☀️' : '🌙'}</button>
 
+        <button onClick={onOpenNotes} title="Session notes" style={{
+          width: 34, height: 34, borderRadius: 8, flexShrink: 0,
+          border: `1px solid ${session?.session_notes ? accent : divider}`,
+          background: session?.session_notes ? (dark ? 'rgba(232,160,32,0.12)' : 'rgba(232,160,32,0.08)') : 'transparent',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <NotesIcon color={session?.session_notes ? accent : ts} />
+        </button>
+
         <button onClick={onEnd} style={{
           height: 40, padding: '0 14px', borderRadius: 8,
           border: 'none', background: '#CC3333', color: '#fff',
@@ -1082,8 +1566,11 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
 
 function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onPickTask, theme, gulperCount }) {
   const { dark, accent, surface, divider, tp, ts } = theme;
+  const taskFromHierarchy = gulper.taskId ? tasks.find(t => t.id === gulper.taskId) : null;
+  const isUnknownTask = gulper.taskId !== null && !taskFromHierarchy;
   const isEmpty      = gulper.taskId === null && gulper.log.length === 0;
-  const task         = isEmpty ? null : (tasks.find(t => t.id === gulper.taskId) || tasks[0]);
+  const showPicker   = isEmpty || isUnknownTask;
+  const task         = showPicker ? null : taskFromHierarchy;
   const hasSubtasks  = task ? task.subtasks.length > 0 : false;
   const subtaskLabel = hasSubtasks ? task.subtasks[gulper.subtaskIdx] : null;
   const logBg = dark ? '#181714' : '#F0EFE8';
@@ -1098,7 +1585,7 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
   const nextBtnHeight   = { normal: 56, compact: 46, mini: 42 }[sz];
   const padH            = { normal: 14, compact: 10, mini: 8  }[sz];
 
-  if (isEmpty) {
+  if (showPicker) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: surface, overflow: 'hidden', minWidth: 0 }}>
         <div style={{ padding: `8px ${padH}px 6px`, borderBottom: `1px solid ${divider}`, flexShrink: 0 }}>
@@ -1211,76 +1698,14 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
 }
 
 // ── Task Picker ────────────────────────────────────────────────────────
-function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTasks, onPick, onClose, theme }) {
+function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, onPick, onClose, onManageTasks, theme }) {
   const { dark, accent, surface, divider, tp, ts } = theme;
   const [expandedTaskId, setExpandedTaskId] = useState(currentTaskId);
-  const [addMode,        setAddMode]        = useState(null); // null | 'task' | 'subtask'
-  const [newTaskName,    setNewTaskName]    = useState('');
-  const [newSubtaskTask, setNewSubtaskTask] = useState(() => tasks[0]?.id || '');
-  const [newSubtaskName, setNewSubtaskName] = useState('');
-  const [addError,       setAddError]       = useState(null);
-  const [pendingAdd,     setPendingAdd]     = useState(null);
-
-  function closeAddForm() {
-    setAddMode(null); setNewTaskName(''); setNewSubtaskName('');
-    setNewSubtaskTask(tasks[0]?.id || ''); setAddError(null);
-  }
-
-  function tryAddTask() {
-    const label = newTaskName.trim();
-    if (!label) { setAddError('Task name cannot be empty.'); return; }
-    if (tasks.some(t => t.label.toLowerCase() === label.toLowerCase())) {
-      setAddError(`A task named "${label}" already exists.`); return;
-    }
-    setAddError(null);
-    setPendingAdd({ type: 'task', label });
-  }
-
-  function tryAddSubtask() {
-    const label = newSubtaskName.trim();
-    if (!label) { setAddError('Subtask name cannot be empty.'); return; }
-    const taskObj = tasks.find(t => t.id === newSubtaskTask);
-    if (!taskObj) { setAddError('Please select a task.'); return; }
-    if (taskObj.subtasks.some(s => s.toLowerCase() === label.toLowerCase())) {
-      setAddError(`"${label}" already exists under ${taskObj.label}.`); return;
-    }
-    setAddError(null);
-    setPendingAdd({ type: 'subtask', label, taskId: newSubtaskTask, taskLabel: taskObj.label });
-  }
-
-  function confirmAdd() {
-    if (!pendingAdd) return;
-    if (pendingAdd.type === 'task') {
-      const id = 'custom_' + Date.now();
-      setTasks(prev => [...prev, { id, label: pendingAdd.label, subtasks: [] }]);
-      setExpandedTaskId(id);
-    } else {
-      setTasks(prev => prev.map(t =>
-        t.id === pendingAdd.taskId ? { ...t, subtasks: [...t.subtasks, pendingAdd.label] } : t
-      ));
-      setExpandedTaskId(pendingAdd.taskId);
-    }
-    setPendingAdd(null);
-    closeAddForm();
-  }
 
   function handleTaskClick(task) {
     if (task.subtasks.length === 0) { onPick(task.id, null); }
     else { setExpandedTaskId(prev => prev === task.id ? null : task.id); }
   }
-
-  const inputSt = {
-    width: '100%', padding: '9px 10px',
-    background: dark ? '#1A1917' : '#F5F4F0',
-    border: `1px solid ${divider}`, borderRadius: 8,
-    color: tp, fontSize: 14, fontFamily: 'IBM Plex Sans', outline: 'none',
-  };
-  const selectSt = {
-    ...inputSt,
-    appearance: 'none', WebkitAppearance: 'none', cursor: 'pointer',
-    backgroundImage: `url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238A8880' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-    backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 32,
-  };
 
   return (
     <>
@@ -1344,102 +1769,18 @@ function TaskPicker({ gulperName, currentTaskId, currentSubtaskIdx, tasks, setTa
             );
           })}
 
-          <div style={{ borderTop: `1px solid ${divider}` }}>
-            {addMode === null && (
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <button onClick={() => setAddMode('task')} style={{
-                  width: '100%', padding: '13px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  borderBottom: `1px solid ${divider}`, color: ts,
-                }}>
-                  <span style={{ fontSize: 18, lineHeight: 1, color: accent }}>+</span>
-                  <span style={{ fontSize: 15, fontWeight: 500 }}>Add new task…</span>
-                </button>
-                <button onClick={() => setAddMode('subtask')} style={{
-                  width: '100%', padding: '13px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 8, color: ts,
-                }}>
-                  <span style={{ fontSize: 18, lineHeight: 1, color: accent }}>+</span>
-                  <span style={{ fontSize: 15, fontWeight: 500 }}>Add new subtask…</span>
-                </button>
-              </div>
-            )}
-
-            {addMode === 'task' && (
-              <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, color: tp }}>New task</div>
-                <input autoFocus value={newTaskName}
-                  onChange={e => { setNewTaskName(e.target.value); setAddError(null); }}
-                  onKeyDown={e => { if (e.key === 'Enter') tryAddTask(); }}
-                  placeholder="Task name" style={inputSt} />
-                {addError && <div style={{ fontSize: 12, color: '#CC3333', fontWeight: 500 }}>{addError}</div>}
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={closeAddForm} style={{ flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`, background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancel</button>
-                  <button onClick={tryAddTask} disabled={!newTaskName.trim()} style={{
-                    flex: 1, height: 40, borderRadius: 8, border: 'none',
-                    background: newTaskName.trim() ? accent : (dark ? '#2A2820' : '#E0DED6'),
-                    color: newTaskName.trim() ? '#fff' : ts,
-                    cursor: newTaskName.trim() ? 'pointer' : 'default', fontWeight: 700, fontSize: 14,
-                  }}>Add task</button>
-                </div>
-              </div>
-            )}
-
-            {addMode === 'subtask' && (
-              <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, color: tp }}>New subtask</div>
-                <select value={newSubtaskTask}
-                  onChange={e => { setNewSubtaskTask(e.target.value); setAddError(null); }}
-                  style={selectSt}>
-                  {tasks.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-                </select>
-                <input autoFocus value={newSubtaskName}
-                  onChange={e => { setNewSubtaskName(e.target.value); setAddError(null); }}
-                  onKeyDown={e => { if (e.key === 'Enter') tryAddSubtask(); }}
-                  placeholder="Subtask name" style={inputSt} />
-                {addError && <div style={{ fontSize: 12, color: '#CC3333', fontWeight: 500 }}>{addError}</div>}
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={closeAddForm} style={{ flex: 1, height: 40, borderRadius: 8, border: `1px solid ${divider}`, background: 'transparent', color: ts, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancel</button>
-                  <button onClick={tryAddSubtask} disabled={!newSubtaskName.trim()} style={{
-                    flex: 1, height: 40, borderRadius: 8, border: 'none',
-                    background: newSubtaskName.trim() ? accent : (dark ? '#2A2820' : '#E0DED6'),
-                    color: newSubtaskName.trim() ? '#fff' : ts,
-                    cursor: newSubtaskName.trim() ? 'pointer' : 'default', fontWeight: 700, fontSize: 14,
-                  }}>Add subtask</button>
-                </div>
-              </div>
-            )}
-          </div>
+          <button onClick={onManageTasks} style={{
+            width: '100%', padding: '13px 16px', background: 'transparent',
+            border: 'none', borderTop: `1px solid ${divider}`, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 10, color: ts,
+          }}>
+            <span style={{ fontSize: 17, lineHeight: 1 }}>⚙</span>
+            <span style={{ fontSize: 15, fontWeight: 500 }}>Manage Tasks…</span>
+          </button>
 
           <div style={{ height: 24 }} />
         </div>
       </div>
-
-      {pendingAdd && (
-        <>
-          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 200 }} />
-          <div style={{
-            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-            zIndex: 201, background: surface, borderRadius: 14,
-            width: 'min(90vw, 360px)', padding: '24px 20px 20px',
-            boxShadow: '0 16px 60px rgba(0,0,0,0.4)',
-          }}>
-            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: tp }}>
-              {pendingAdd.type === 'task' ? 'Add new task?' : 'Add new subtask?'}
-            </div>
-            <div style={{ fontSize: 14, color: ts, lineHeight: 1.6, marginBottom: 20 }}>
-              {pendingAdd.type === 'task'
-                ? <>You're about to add a new task: <strong style={{ color: tp }}>"{pendingAdd.label}"</strong>. This will be available in all future sessions.</>
-                : <>You're about to add a new subtask: <strong style={{ color: tp }}>"{pendingAdd.label}"</strong> under <strong style={{ color: tp }}>"{pendingAdd.taskLabel}"</strong>. This will be available in all future sessions.</>
-              }
-            </div>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => setPendingAdd(null)} style={{ flex: 1, height: 44, borderRadius: 10, border: `1.5px solid ${divider}`, background: 'transparent', cursor: 'pointer', fontWeight: 600, fontSize: 14, color: tp }}>Cancel</button>
-              <button onClick={confirmAdd} style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 14, color: '#fff' }}>Confirm</button>
-            </div>
-          </div>
-        </>
-      )}
     </>
   );
 }
@@ -1475,7 +1816,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
   };
 
   const [entries,    setEntries]    = useState(initEntries);
-  const [globalNote, setGlobalNote] = useState('');
+  const [globalNote, setGlobalNote] = useState(session.session_notes || '');
   const [toast,      setToast]      = useState(null);
   const [hasExported, setHasExported] = useState(false);
   const [confirmNew,  setConfirmNew]  = useState(false);
@@ -1693,6 +2034,53 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
   );
 }
 
+// ── Notes Editor ──────────────────────────────────────────────────────
+function NotesEditor({ initialText, onSave, onCancel, theme }) {
+  const { dark, accent, surface, divider, tp, ts } = theme;
+  const [text, setText] = useState(initialText);
+  return (
+    <>
+      <div onClick={onCancel} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200 }} />
+      <div style={{
+        position: 'fixed', top: 60, left: 12, right: 12, zIndex: 201,
+        background: surface, borderRadius: 14, padding: 16,
+        boxShadow: '0 8px 40px rgba(0,0,0,0.3)',
+        display: 'flex', flexDirection: 'column', gap: 12,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontWeight: 700, fontSize: 16, color: tp }}>Session Notes</div>
+          <div style={{ fontSize: 11, color: ts }}>Timers continue while editing</div>
+        </div>
+        <textarea
+          autoFocus
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder="Type notes here…"
+          rows={7}
+          style={{
+            width: '100%', padding: '10px 12px',
+            background: dark ? '#1A1917' : '#F5F4F0',
+            border: `1px solid ${divider}`, borderRadius: 8,
+            color: tp, fontSize: 14, lineHeight: 1.6,
+            fontFamily: 'IBM Plex Sans', outline: 'none', resize: 'none',
+          }}
+        />
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={onCancel} style={{
+            flex: 1, height: 44, borderRadius: 10,
+            border: `1.5px solid ${divider}`, background: 'transparent',
+            cursor: 'pointer', fontWeight: 600, fontSize: 15, color: tp,
+          }}>Cancel</button>
+          <button onClick={() => onSave(text)} style={{
+            flex: 1, height: 44, borderRadius: 10, border: 'none',
+            background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#fff',
+          }}>Save</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── Icons ─────────────────────────────────────────────────────────────
 function StatusDot({ running, accent }) {
   return <div style={{ width: 10, height: 10, borderRadius: '50%', background: running ? accent : 'transparent', border: `2px solid ${running ? accent : '#AAAAAA'}`, boxShadow: running ? `0 0 0 3px ${accent}33` : 'none', transition: 'all 0.2s' }} />;
@@ -1705,6 +2093,16 @@ function PauseIcon({ color }) {
 }
 function NextIcon({ color }) {
   return <svg width="14" height="14" viewBox="0 0 14 14"><polygon points="2,2 10,7 2,12" fill={color}/><rect x="11" y="2" width="2" height="10" rx="1" fill={color}/></svg>;
+}
+function NotesIcon({ color }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <rect x="2" y="1" width="12" height="14" rx="2" stroke={color} strokeWidth="1.5"/>
+      <line x1="5" y1="5" x2="11" y2="5" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+      <line x1="5" y1="8" x2="11" y2="8" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+      <line x1="5" y1="11" x2="9" y2="11" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    </svg>
+  );
 }
 function XlsxIcon() {
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
