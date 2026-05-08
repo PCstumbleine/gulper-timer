@@ -110,6 +110,29 @@ function nextRosterId(roster) {
   return `g_${String(max + 1).padStart(3, '0')}`;
 }
 
+// ── Enumerator Roster ─────────────────────────────────────────────────
+const ENUMERATOR_ROSTER_KEY = 'enumerator_roster';
+
+function loadEnumeratorRoster() {
+  try {
+    const raw = localStorage.getItem(ENUMERATOR_ROSTER_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  saveEnumeratorRoster([]);
+  return [];
+}
+function saveEnumeratorRoster(r) {
+  try { localStorage.setItem(ENUMERATOR_ROSTER_KEY, JSON.stringify(r)); } catch(e) {}
+}
+function nextEnumeratorId(roster) {
+  let max = 0;
+  for (const e of roster) {
+    const m = e.id.match(/^e_(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1]));
+  }
+  return `e_${String(max + 1).padStart(3, '0')}`;
+}
+
 // ── Session persistence ───────────────────────────────────────────────
 const PERSIST_KEY = 'gulper_active_session';
 
@@ -201,7 +224,7 @@ function genJobId() {
   return `${dateStr}_${String(count).padStart(2,'0')}`;
 }
 function newGulper(id, name) {
-  return { id, name, taskId: 'travel', subtaskIdx: 0, accumulatedMs: 0, running: false, runningSince: null, log: [] };
+  return { id, name, taskId: null, subtaskIdx: 0, accumulatedMs: 0, running: false, runningSince: null, log: [] };
 }
 function liveElapsed(g) {
   return g.runningSince ? g.accumulatedMs + (Date.now() - g.runningSince) : g.accumulatedMs;
@@ -240,12 +263,14 @@ function App() {
   const [screen,     setScreen]     = useState(_SAVED?.screen     || 'setup');
   const [isResuming, setIsResuming] = useState(_SAVED?.isResuming || false);
   const [session,    setSession]    = useState(_SAVED?.session     || {
-    jobId: '', enumerator: '',
+    jobId: '', enumerator_first_name: '', enumerator_last_name: '', enumerator_id: null,
     gulperCount: 2, gulperSelections: [],
     latrineCoords: null, sessionStart: null,
   });
   const [tasks,   setTasks]   = useState(() => loadTasks());
   useEffect(() => { saveTasks(tasks); }, [tasks]);
+  const [enumeratorRoster, setEnumeratorRoster] = useState(() => loadEnumeratorRoster());
+  useEffect(() => { saveEnumeratorRoster(enumeratorRoster); }, [enumeratorRoster]);
   const [gulpers, setGulpers] = useState(_SAVED?.gulpers || null);
 
   const persistRef = useRef(null);
@@ -289,7 +314,9 @@ function App() {
   function resumeSession(meta) {
     setSession(s => ({
       ...s,
-      enumerator: meta.enumerator,
+      enumerator_first_name: meta.enumerator_first_name,
+      enumerator_last_name: meta.enumerator_last_name,
+      enumerator_id: meta.enumerator_id,
       jobId: meta.jobId,
       gulperCount: meta.gulperCount,
       gulperSelections: meta.gulperSelections,
@@ -312,7 +339,7 @@ function App() {
     persistRef.current = null;
     setGulpers(null);
     setTasks(loadTasks());
-    setSession({ jobId: '', enumerator: '', gulperCount: 2, gulperSelections: [], latrineCoords: null, sessionStart: null });
+    setSession({ jobId: '', enumerator_first_name: '', enumerator_last_name: '', enumerator_id: null, gulperCount: 2, gulperSelections: [], latrineCoords: null, sessionStart: null });
     setIsResuming(false);
     setScreen('setup');
   }
@@ -354,6 +381,8 @@ function App() {
           toggleTheme={toggleTheme}
           roster={roster}
           setRoster={setRoster}
+          enumeratorRoster={enumeratorRoster}
+          setEnumeratorRoster={setEnumeratorRoster}
         />
       )}
       {screen === 'timer' && gulpers && (
@@ -393,12 +422,16 @@ function App() {
 // ═══════════════════════════════════════════════════════════════════════
 // SCREEN 1 — Setup
 // ═══════════════════════════════════════════════════════════════════════
-function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, roster, setRoster }) {
+function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, roster, setRoster, enumeratorRoster, setEnumeratorRoster }) {
   const { dark, accent, bg, surface, surface2, divider, tp, ts } = theme;
   const isResuming = !!onResume;
 
   const [jobId]      = useState(() => initialValues?.jobId || genJobId());
-  const [enumerator, setEnumerator] = useState(initialValues?.enumerator || '');
+  // Backward-compat: old sessions may have a single enumerator string
+  const _oldEnum  = initialValues?.enumerator || '';
+  const _oldParts = _oldEnum ? _oldEnum.split(' ') : [];
+  const [enumLast,  setEnumLast]  = useState(initialValues?.enumerator_last_name  || (_oldParts.length > 1 ? _oldParts.slice(1).join(' ') : ''));
+  const [enumFirst, setEnumFirst] = useState(initialValues?.enumerator_first_name || (_oldParts.length > 0 ? _oldParts[0] : ''));
   // Gulper count fixed during resume to avoid mismatched timer state
   const [gulperCount, setGulperCount] = useState(initialValues?.gulperCount ?? 2);
   const [selections, setSelections] = useState(() => {
@@ -423,13 +456,27 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, ros
   const selectedIds = selections.filter(Boolean).map(s => s.id);
   const hasDuplicates = selectedIds.length !== new Set(selectedIds).size;
   const allFilled = selections.every(Boolean);
-  const canStart = allFilled && !hasDuplicates;
+  const enumOk   = enumFirst.trim().length > 0 && enumLast.trim().length > 0;
+  const canStart = allFilled && !hasDuplicates && enumOk;
 
   function handleStart() {
     if (!canStart) return;
+    const first = enumFirst.trim();
+    const last  = enumLast.trim();
+    let enumEntry = enumeratorRoster.find(
+      e => e.first_name.toLowerCase() === first.toLowerCase() && e.last_name.toLowerCase() === last.toLowerCase()
+    );
+    let newRoster = enumeratorRoster;
+    if (!enumEntry) {
+      enumEntry = { id: nextEnumeratorId(enumeratorRoster), first_name: first, last_name: last };
+      newRoster = [...enumeratorRoster, enumEntry];
+      setEnumeratorRoster(newRoster);
+    }
     const meta = {
       jobId,
-      enumerator: enumerator.trim(),
+      enumerator_first_name: first,
+      enumerator_last_name:  last,
+      enumerator_id:         enumEntry.id,
       gulperCount,
       gulperSelections: selections,
       latrineCoords: initialValues?.latrineCoords || null,
@@ -505,9 +552,39 @@ function SetupScreen({ theme, onStart, initialValues, onResume, toggleTheme, ros
               </div>
               <span style={{ fontSize: 20 }}>🪪</span>
             </div>
-            <div>
-              <label style={labelStyle}>Enumerator name</label>
-              <input value={enumerator} onChange={e => setEnumerator(e.target.value)} placeholder="Optional" style={inputStyle} />
+            <div style={{ display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Enumerator last name <span style={{ color: '#CC3333' }}>*</span></label>
+                <input
+                  list="enum-last-list"
+                  value={enumLast}
+                  onChange={e => setEnumLast(e.target.value)}
+                  placeholder="Required"
+                  style={inputStyle}
+                  autoComplete="off"
+                />
+                <datalist id="enum-last-list">
+                  {[...new Set(enumeratorRoster.map(e => e.last_name))].map(n => (
+                    <option key={n} value={n} />
+                  ))}
+                </datalist>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>First name <span style={{ color: '#CC3333' }}>*</span></label>
+                <input
+                  list="enum-first-list"
+                  value={enumFirst}
+                  onChange={e => setEnumFirst(e.target.value)}
+                  placeholder="Required"
+                  style={inputStyle}
+                  autoComplete="off"
+                />
+                <datalist id="enum-first-list">
+                  {[...new Set(enumeratorRoster.map(e => e.first_name))].map(n => (
+                    <option key={n} value={n} />
+                  ))}
+                </datalist>
+              </div>
             </div>
           </div>
         </Section>
@@ -1005,8 +1082,9 @@ function TopBar({ session, setSession, onEnd, onBackToSetup, toggleTheme, theme 
 
 function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onPickTask, theme, gulperCount }) {
   const { dark, accent, surface, divider, tp, ts } = theme;
-  const task = tasks.find(t => t.id === gulper.taskId) || tasks[0];
-  const hasSubtasks = task.subtasks.length > 0;
+  const isEmpty      = gulper.taskId === null && gulper.log.length === 0;
+  const task         = isEmpty ? null : (tasks.find(t => t.id === gulper.taskId) || tasks[0]);
+  const hasSubtasks  = task ? task.subtasks.length > 0 : false;
   const subtaskLabel = hasSubtasks ? task.subtasks[gulper.subtaskIdx] : null;
   const logBg = dark ? '#181714' : '#F0EFE8';
 
@@ -1019,6 +1097,29 @@ function GulperPanel({ gulper, idx, tasks, elapsed, onToggle, onNextAndPick, onP
   const btnHeight       = { normal: 52, compact: 44, mini: 40 }[sz];
   const nextBtnHeight   = { normal: 56, compact: 46, mini: 42 }[sz];
   const padH            = { normal: 14, compact: 10, mini: 8  }[sz];
+
+  if (isEmpty) {
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: surface, overflow: 'hidden', minWidth: 0 }}>
+        <div style={{ padding: `8px ${padH}px 6px`, borderBottom: `1px solid ${divider}`, flexShrink: 0 }}>
+          <div style={{ textAlign: 'center', fontWeight: 700, fontSize: nameFontSize, color: tp, letterSpacing: '-0.01em', lineHeight: 1.15 }}>
+            {gulper.name}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', padding: padH }}>
+          <button onClick={onPickTask} style={{
+            flex: 1, borderRadius: 14, border: `2px dashed ${divider}`,
+            background: 'transparent', cursor: 'pointer',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+            color: ts,
+          }}>
+            <span style={{ fontSize: 28 }}>＋</span>
+            <span style={{ fontSize: sz === 'normal' ? 15 : 13, fontWeight: 600 }}>Select task and subtask</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: surface, overflow: 'hidden', minWidth: 0 }}>
@@ -1358,15 +1459,17 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
         gulper: e.gulper || g.name,
         inProgress: false, note: '',
       }));
-      const task = tasks.find(t => t.id === g.taskId);
-      entries.push({
-        gulper_id: g.id || null,
-        gulper: g.name,
-        task: task?.label || g.taskId,
-        subtask: task?.subtasks[g.subtaskIdx] || task?.label || '',
-        ms: liveElapsed(g),
-        ts: new Date(), inProgress: true, note: '',
-      });
+      if (g.taskId !== null) {
+        const task = tasks.find(t => t.id === g.taskId);
+        entries.push({
+          gulper_id: g.id || null,
+          gulper: g.name,
+          task: task?.label || g.taskId,
+          subtask: task?.subtasks[g.subtaskIdx] || task?.label || '',
+          ms: liveElapsed(g),
+          ts: new Date(), inProgress: true, note: '',
+        });
+      }
     });
     return entries;
   };
@@ -1390,7 +1493,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
     });
 
     const header = [
-      'job_id', 'enumerator', 'date', 'session_start_time', 'session_end_time',
+      'job_id', 'enumerator_first_name', 'enumerator_last_name', 'date', 'session_start_time', 'session_end_time',
       'latrine_gps_lat', 'latrine_gps_lng', 'session_notes', 'num_gulpers',
       'entry_number', 'gulper_id', 'gulper_first_name', 'gulper_last_name', 'task', 'subtask',
       'entry_start_time', 'entry_end_time', 'duration_seconds',
@@ -1403,8 +1506,9 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
       const subtaskVal = (taskObj && taskObj.subtasks.length > 0) ? (e.subtask || '') : '';
       const rEntry     = (roster || []).find(r => r.id === e.gulper_id);
       return [
-        session.jobId        || '',
-        session.enumerator   || '',
+        session.jobId || '',
+        session.enumerator_first_name || (session.enumerator ? session.enumerator.split(' ')[0] : '') || '',
+        session.enumerator_last_name  || (session.enumerator ? session.enumerator.split(' ').slice(1).join(' ') : '') || '',
         fmtLocalDate(session.sessionStart),
         fmtLocalTime(session.sessionStart),
         fmtLocalTime(now),
@@ -1497,7 +1601,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
             <div style={{ padding: '14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
               {[
                 ['Job ID',         session.jobId || '—'],
-                ['Enumerator',     session.enumerator || '—'],
+                ['Enumerator', (() => { const fn = session.enumerator_first_name; const ln = session.enumerator_last_name; if (fn || ln) return [ln, fn].filter(Boolean).join(', '); return session.enumerator || '—'; })()],
                 ['Started',        fmtWall(session.sessionStart)],
                 ['Ended',          fmtWall(new Date())],
                 ['Pit latrine GPS', fmtCoords(session.latrineCoords)],
