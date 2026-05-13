@@ -1885,7 +1885,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
         subtaskVal,
         fmtLocalTime(startTs),
         fmtLocalTime(endTs),
-        ((e.ms || 0) / 1000).toFixed(1),
+        Math.round(((e.ms || 0) / 1000) * 10) / 10,
         session.jobId || '',
       ];
     });
