@@ -166,7 +166,7 @@ function clearSavedSession() {
 // ── Default task hierarchy ────────────────────────────────────────────
 const TASK_HIERARCHY_KEY         = 'task_hierarchy';
 const TASK_HIERARCHY_VERSION_KEY = 'task_hierarchy_version';
-const TASK_HIERARCHY_VERSION     = 'v2';
+const TASK_HIERARCHY_VERSION     = 'v3';
 
 const DEFAULT_TASKS = [
   { id: 'communication',  label: 'Communication',  subtasks: ['With client(s)', 'With other gulper(s)'] },
@@ -174,8 +174,9 @@ const DEFAULT_TASKS = [
   { id: 'equipment',      label: 'Equipment',      subtasks: ['Maneuvering', 'Repairing', 'Cleaning'] },
   { id: 'earthworks',     label: 'Earthworks',     subtasks: ['Dig trench', 'Put hole in pit liner', 'Repair pit liner', 'Fill trench'] },
   { id: 'superstructure', label: 'Superstructure', subtasks: ['Inspection', 'Modification', 'Repair', 'Cleaning'] },
-  { id: 'extraction',     label: 'Extraction',     subtasks: ['Removing sludge', 'Pulling out trash'] },
-  { id: 'travel',         label: 'Travel',         subtasks: ['Travel to disposal site', 'On errand'] },
+  { id: 'extraction',      label: 'Extraction',      subtasks: ['Removing sludge', 'Pulling out trash'] },
+  { id: 'sludge_handling', label: 'Sludge handling', subtasks: ['Filling containers', 'Container transport'] },
+  { id: 'travel',          label: 'Travel',          subtasks: ['Travel to disposal site', 'On errand'] },
   { id: 'disposal',       label: 'Disposal',       subtasks: [] },
   { id: 'rest',           label: 'Rest',           subtasks: [] },
 ];
