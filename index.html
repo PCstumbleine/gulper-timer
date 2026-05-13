@@ -1825,50 +1825,70 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
 
   const gulperSelections = session.gulperSelections || [];
 
-  function buildTidyRows() {
+  function buildSessionInfo() {
     const now = new Date();
+    const header = [
+      'job_id', 'enumerator_first_name', 'enumerator_last_name', 'date',
+      'session_start_time', 'session_end_time',
+      'latrine_gps_lat', 'latrine_gps_lng', 'num_gulpers',
+      'gulper_1_id', 'gulper_1_first_name', 'gulper_1_last_name',
+      'gulper_2_id', 'gulper_2_first_name', 'gulper_2_last_name',
+      'gulper_3_id', 'gulper_3_first_name', 'gulper_3_last_name',
+      'gulper_4_id', 'gulper_4_first_name', 'gulper_4_last_name',
+      'session_notes',
+    ];
+    const gulperCols = [];
+    for (let slot = 0; slot < 4; slot++) {
+      const sel = gulperSelections[slot];
+      if (sel) {
+        const rEntry = (roster || []).find(r => r.id === sel.id);
+        gulperCols.push(rosterIdToInt(sel.id), rEntry?.first_name || '', rEntry?.last_name || '');
+      } else {
+        gulperCols.push('', '', '');
+      }
+    }
+    const row = [
+      session.jobId || '',
+      session.enumerator_first_name || (session.enumerator ? session.enumerator.split(' ')[0] : '') || '',
+      session.enumerator_last_name  || (session.enumerator ? session.enumerator.split(' ').slice(1).join(' ') : '') || '',
+      fmtLocalDate(session.sessionStart),
+      fmtLocalTime(session.sessionStart),
+      fmtLocalTime(now),
+      session.latrineCoords ? parseFloat(session.latrineCoords.lat.toFixed(5)) : '',
+      session.latrineCoords ? parseFloat(session.latrineCoords.lng.toFixed(5)) : '',
+      gulperSelections.length,
+      ...gulperCols,
+      globalNote || '',
+    ];
+    return { header, row };
+  }
+
+  function buildTaskInfo() {
+    const header = [
+      'entry_number', 'gulper_id', 'task', 'subtask',
+      'entry_start_time', 'entry_end_time', 'duration_seconds', 'job_id',
+    ];
     const sortedEntries = [...entries].sort((a, b) => {
       const aStart = new Date(a.ts).getTime() - (a.ms || 0);
       const bStart = new Date(b.ts).getTime() - (b.ms || 0);
       return aStart - bStart;
     });
-
-    const header = [
-      'job_id', 'enumerator_first_name', 'enumerator_last_name', 'date', 'session_start_time', 'session_end_time',
-      'latrine_gps_lat', 'latrine_gps_lng', 'session_notes', 'num_gulpers',
-      'entry_number', 'gulper_id', 'gulper_first_name', 'gulper_last_name', 'task', 'subtask',
-      'entry_start_time', 'entry_end_time', 'duration_seconds',
-    ];
-
     const data = sortedEntries.map((e, i) => {
       const endTs      = e.ts instanceof Date ? e.ts : new Date(e.ts);
       const startTs    = new Date(endTs.getTime() - (e.ms || 0));
       const taskObj    = tasks.find(t => t.label === e.task);
       const subtaskVal = (taskObj && taskObj.subtasks.length > 0) ? (e.subtask || '') : '';
-      const rEntry     = (roster || []).find(r => r.id === e.gulper_id);
       return [
-        session.jobId || '',
-        session.enumerator_first_name || (session.enumerator ? session.enumerator.split(' ')[0] : '') || '',
-        session.enumerator_last_name  || (session.enumerator ? session.enumerator.split(' ').slice(1).join(' ') : '') || '',
-        fmtLocalDate(session.sessionStart),
-        fmtLocalTime(session.sessionStart),
-        fmtLocalTime(now),
-        session.latrineCoords ? parseFloat(session.latrineCoords.lat.toFixed(5)) : '',
-        session.latrineCoords ? parseFloat(session.latrineCoords.lng.toFixed(5)) : '',
-        globalNote           || '',
-        gulperSelections.length,
         i + 1,
         rosterIdToInt(e.gulper_id),
-        rEntry?.first_name   || '',
-        rEntry?.last_name    || '',
-        e.task               || '',
+        e.task || '',
         subtaskVal,
         fmtLocalTime(startTs),
         fmtLocalTime(endTs),
         ((e.ms || 0) / 1000).toFixed(1),
+        session.jobId || '',
       ];
     });
-
     return { header, data };
   }
 
@@ -1879,7 +1899,7 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
   }
 
   function exportCSV() {
-    const { header, data } = buildTidyRows();
+    const { header, data } = buildTaskInfo();
     const escapeHeader = c => {
       const s = String(c);
       return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1902,9 +1922,11 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
 
   function exportXLSX() {
     if (typeof XLSX === 'undefined') { showToast('Excel library not loaded — check connection'); return; }
-    const { header, data } = buildTidyRows();
+    const { header: siHeader, row: siRow } = buildSessionInfo();
+    const { header: tiHeader, data: tiData } = buildTaskInfo();
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([header, ...data]));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([siHeader, siRow]), 'Session Info');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([tiHeader, ...tiData]), 'Task Info');
     XLSX.writeFile(wb, exportFilename('xlsx'));
     setHasExported(true);
   }
@@ -1978,13 +2000,13 @@ function ReviewScreen({ theme, session, tasks, gulpers, roster, onBack, onNewSes
           background: accent, cursor: 'pointer', fontWeight: 700, fontSize: 17, color: '#fff',
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
         }}>
-          <XlsxIcon /> Download .xlsx
+          <XlsxIcon /> Download .xlsx (Session + Task Info)
         </button>
         <button onClick={exportCSV} style={{
           height: 40, borderRadius: 8,
           border: `1px solid ${divider}`, background: 'transparent',
           cursor: 'pointer', fontWeight: 500, fontSize: 14, color: ts,
-        }}>Export as CSV (backup)</button>
+        }}>Download CSV (Task Info only)</button>
         <div style={{ height: 1, background: divider, margin: '4px 0' }} />
         <button onClick={handleNewSession} style={{
           height: 58, borderRadius: 12,
